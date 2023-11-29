@@ -1,0 +1,2 @@
+python-telegram-bot==12.8
+python-decouple==3.4
