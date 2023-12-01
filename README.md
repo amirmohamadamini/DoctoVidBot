@@ -1,2 +1,3 @@
 # DoctoVidBot
-Telegram for converting videos in document to streamable video on Telegram.
+Telegram bot for converting videos in document to streamable video on Telegram.
+https://t.me/DoctoVidbot
