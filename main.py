@@ -50,16 +50,13 @@ async def help_command(event):
 @bot.on(events.NewMessage(func=lambda e: e.document or e.video))
 async def process_video(event):
     """Process video files (either as document or video)"""
-    user_id = event.sender_id
-    chat_id = event.chat_id
-    message_id = event.id
 
-    if user_id in active_conversions:
+    if event.sender_id in active_conversions:
         await event.respond("⏳ Please wait for your current video to finish processing.")
         return
     
     # Add user to active conversions
-    active_conversions.add(user_id)
+    active_conversions.add(event.sender_id)
     
     try:
         # Send processing message
@@ -92,77 +89,52 @@ async def process_video(event):
             
             if not is_video:
                 await processing_msg.edit("❌ This doesn't appear to be a video file. Please send a video file.")
-                active_conversions.remove(user_id)
+                active_conversions.remove(event.sender_id)
                 return
         else:
             # It's already a video, just get its attributes
             media = event.video
-            video_duration = media.duration
-            video_width = media.w
-            video_height = media.h
             filename = "video.mp4"
-            for attr in media.attributes:
-                if isinstance(attr, DocumentAttributeFilename):
-                    filename = attr.file_name
-                    break
         
-        temp_file = os.path.join(TEMP_DIR, f"temp_{user_id}_{message_id}_{filename}")
+        temp_file = os.path.join(TEMP_DIR, f"temp_{event.sender_id}_{event.id}_{filename}")
         
         # Download file
         await processing_msg.edit("⬇️ Downloading video...")
         await bot.download_media(message=event.message, file=temp_file)
         
-        thumb = None
-        if hasattr(event.message.media, 'thumbs') and event.message.media.thumbs:
-            await processing_msg.edit("🖼️ Extracting thumbnail...")
-            thumb_path = os.path.join(TEMP_DIR, f"thumb_{user_id}_{message_id}.jpg")
-            thumb = await bot.download_media(event.message.media.thumbs[0], thumb_path)
-        
         if event.video and not event.document:
             await processing_msg.edit("ℹ️ This video is already in streamable format!")
             os.remove(temp_file)
-            if thumb and os.path.exists(thumb):
-                os.remove(thumb)
-            active_conversions.remove(user_id)
+            active_conversions.remove(event.sender_id)
             return
         
 
-        await processing_msg.edit("⬆️ Converting to streamable format...")
+        await processing_msg.edit("⬆️ Uploadin as a streamable format...")
         
         if not filename.lower().endswith(('.mp4', '.avi', '.mkv', '.mov')):
             filename = f"{filename}.mp4"
 
         await bot.send_file(
-            chat_id,
+            event.chat_id,
             temp_file,
             caption="✅ Here's your streamable video!",
             supports_streaming=True,
             video_note=False,
-            thumb=thumb,
-            attributes=[
-                DocumentAttributeVideo(
-                    duration=video_duration if video_duration else 0,
-                    w=video_width if video_width else 1280,
-                    h=video_height if video_height else 720,
-                    supports_streaming=True
-                )
-            ],
-            reply_to=message_id,
+            thumb=temp_file,
+            reply_to=event.id,
             file_name=filename
         )
 
         await processing_msg.delete()
         if os.path.exists(temp_file):
             os.remove(temp_file)
-        if thumb and os.path.exists(thumb):
-            os.remove(thumb)
             
     except Exception as e:
         logger.error(f"Error: {e}")
         await event.respond(f"❌ An error occurred while processing your video: {str(e)}")
     finally:
-        if user_id in active_conversions:
-            active_conversions.remove(user_id)
+        if event.sender_id in active_conversions:
+            active_conversions.remove(event.sender_id)
 
 async def cleanup_temp_files():
     """Cleanup temporary files on startup"""
