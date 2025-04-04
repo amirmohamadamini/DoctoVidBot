@@ -117,7 +117,7 @@ async def process_video(event):
         await bot.send_file(
             event.chat_id,
             temp_file,
-            caption="✅ Here's your streamable video!",
+            caption=f"✅ Here's your streamable video! \n  uploaded by [{event.sender_id}](tg://openmessage?user_id={event.sender_id})",
             supports_streaming=True,
             video_note=False,
             thumb=temp_file,
