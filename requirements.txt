@@ -1,3 +1,5 @@
 telethon>=1.37.0
 python-dotenv
 cryptg
+pillow
+hachoir
