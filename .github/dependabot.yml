@@ -1,0 +1,16 @@
+# Weekly pull requests for newer dependencies, so security fixes in
+# Telethon, ffmpeg's base image or the CI actions aren't missed.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
