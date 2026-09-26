@@ -1,0 +1,62 @@
+# Two services from one image. The bot talks to Telegram and keeps the data;
+# the media worker runs ffmpeg on strangers' files, and can reach nothing but
+# the scratch volume they share. See the Security section of the README.
+
+x-hardened: &hardened
+  restart: unless-stopped
+  # No kernel capabilities, no way to gain privileges, and nothing writable
+  # but the volumes and a small /tmp.
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+
+x-build: &build
+  context: .
+  args:
+    # Blank means Docker Hub. See PYTHON_IMAGE in .env.example.
+    PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.14-slim}
+
+x-shared: &shared
+  SCRATCH_DIR: /scratch/jobs
+  MEDIA_SOCKET: /scratch/sock/media.sock
+
+services:
+  bot:
+    <<: *hardened
+    build: *build
+    image: doctovid
+    env_file: .env
+    environment: *shared
+    volumes:
+      - data:/data
+      - scratch:/scratch
+    depends_on:
+      - media
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 128
+
+  media:
+    <<: *hardened
+    build: *build
+    image: doctovid
+    command: ["doctovid-media"]
+    user: media
+    # No network at all: it talks to the bot over a socket on the volume.
+    network_mode: none
+    # Deliberately no env_file: it never sees BOT_TOKEN or API_HASH.
+    environment: *shared
+    volumes:
+      - scratch:/scratch
+    # Each ffmpeg is also capped at 1 GB, and is the first thing killed if
+    # memory runs out. Raise these if you raise WORKERS.
+    mem_limit: 2g
+    cpus: 2
+    pids_limit: 128
+
+volumes:
+  data:
+  scratch:
