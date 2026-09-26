@@ -1,5 +1,0 @@
-telethon
-python-dotenv
-cryptg
-pillow
-hachoir
