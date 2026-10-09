@@ -9,6 +9,7 @@ from typing import BinaryIO
 
 import pytest
 
+from doctovid import i18n
 from doctovid.config import Config, load
 from doctovid.jobs import Job, Mode, Request
 from doctovid.media import MediaInfo
@@ -22,6 +23,15 @@ needs_ffmpeg = pytest.mark.skipif(
 )
 
 MakeClip = Callable[..., Path]
+
+LOCALES = i18n.load()
+EN = LOCALES.get("en")
+FA = LOCALES.get("fa")
+
+
+def bare(text: str) -> str:
+    """Text as a reader sees it, without the invisible direction marks."""
+    return text.translate({ord(mark): None for mark in (i18n.LRM, i18n.RLM, i18n.FSI, i18n.PDI)})
 
 
 @pytest.fixture

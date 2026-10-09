@@ -1,0 +1,208 @@
+# English: the reference every other language is checked against.
+#
+# The bot fills in the {placeholders}. A translation keeps every placeholder
+# and every <b>/<i> tag, and can reword everything else freely. A message with
+# plural forms is a table of them: see PLURALS in i18n.py for the forms each
+# language needs.
+
+[language]
+name = "English"
+direction = "ltr"
+digits = "0123456789"
+decimal = "."
+choose = "🌐 Choose your language"
+chosen = "✅ The bot will speak English with you."
+
+[unit]
+size = "{value} {unit}"
+b = "B"
+kb = "KB"
+mb = "MB"
+gb = "GB"
+percent = "{value}%"
+speed = "{size}/s"
+minutes = { one = "{count} min", other = "{count} min" }
+hours = { one = "{count} h", other = "{count} h" }
+days = { one = "{count} day", other = "{count} days" }
+pair = "{first} {second}"
+
+[keyboard]
+help = "❓ Help"
+usage = "📊 My usage"
+language = "🌐 Language"
+admin = "🛠 Admin panel"
+placeholder = "Send a file…"
+
+[command]
+start = "Show the menu"
+
+[start]
+welcome = """<b>Send me a video as a file</b> and I'll send it back as a video you can play right here in Telegram.
+
+I can also rename any file, change its extension, or give it a new thumbnail.
+
+Files up to {size}. Tap {help} below for details."""
+cache_note = "<i>Videos sent back without a new name or thumbnail are kept in a private channel, so the same file comes back instantly next time.</i>"
+nudge = "👋 Send me a file, or tap {help}."
+
+[help]
+text = """<b>How it works</b>
+
+1. Send a file. For a video, send it <b>as a file</b> (in the attach menu, choose File).
+2. Pick what to do with it:
+   <b>Make playable</b>: for videos. Telegram only plays MP4 inline. A video that is already a playable MP4 is sent straight back; an MKV, AVI, WebM and so on is repacked into MP4 without re-encoding, so the quality is unchanged and it takes seconds.
+   <b>Send as file</b>: returns the file untouched, with any new name or thumbnail.
+   <b>Rename</b>: type a new name. Add an extension to change it too.
+   <b>Thumbnail</b>: send a photo to use as the cover.
+3. If other files are ahead of yours, you'll see your place in the queue.
+
+Videos that would need re-encoding (for example VP9) can't be made playable, but can still be renamed or given a thumbnail.
+
+There is a daily and a monthly limit on how many files, and how much data, each person can send. Tap {usage} to see where you are."""
+admin_note = "You're an admin: tap {admin} for the admin panel."
+
+[menu]
+title = "<b>{name}</b> · {size}"
+new_name = "New name: <b>{name}</b>"
+playable_name = "<i>Made playable, it will be called {name}.</i>"
+thumbnail = "Thumbnail: your picture"
+question = "What should I do with it?"
+make_playable = "▶️ Make playable"
+send_file = "📄 Send as file"
+rename = "✏️ Rename"
+add_thumbnail = "🖼 Thumbnail"
+change_thumbnail = "🖼 Change thumbnail"
+remove_thumbnail = "🗑 Remove thumbnail"
+cancel = "✖️ Cancel"
+cancelled = "✖️ Cancelled."
+expired = "⌛ This menu expired. Send the file again if you still need it."
+expired_alert = "This menu has expired. Send the file again."
+thumbnail_removed = "Thumbnail removed."
+rename_prompt = """Send the new name for <b>{name}</b>.
+Leave off the extension to keep it, or type one to change it."""
+thumbnail_prompt = "Send a photo to use as the thumbnail."
+thumbnail_hint = "Send a photo"
+
+[file]
+too_big = "📦 That file is {size}. The most I can take is {limit}."
+photo = "📷 That's a photo, and Telegram strips photos of their name. Send it as a file to rename it."
+too_many_open = "✋ Finish or cancel one of your open files first."
+over_limit = "🚫 {reason}"
+
+[thumbnail]
+too_big = "⚠️ That picture is {size}. A thumbnail can be at most {limit}. Tap {button} to try a smaller one."
+too_many = "⏳ That's a lot of thumbnails. Try again in a little while, or send the file back without one."
+unusable = "⚠️ I couldn't use that picture. Tap {button} to try another."
+
+[queue]
+waiting = "⏳ <b>{name}</b> is waiting its turn: number {position} in the queue."
+starting = "⏳ Starting <b>{name}</b>…"
+per_user = { one = "You already have {count} file on the way. Wait for it to finish.", other = "You already have {count} files on the way. Wait for one to finish." }
+full = "I'm very busy right now. Try again in a few minutes."
+finished = "That's already finished."
+stopped = "Cancelled."
+
+[join]
+prompt = "To use this bot, please join our channel first."
+open = "📢 Join the channel"
+done = "✅ I've joined"
+thanks_alert = "Thanks for joining!"
+thanks = "✅ Thanks for joining. Now send me your file."
+not_yet = "I can't see you in the channel yet. Join it, then tap again."
+
+[job]
+downloading = "⬇️ Downloading <b>{name}</b>…"
+uploading = "⬆️ Uploading <b>{name}</b>…"
+failed = "⚠️ {reason}"
+gone = "That file is no longer in this chat. Send it again."
+disk = "The server is short of disk space right now. Try again later."
+not_video = "That doesn't look like a video, so it can't be made playable."
+unsupported = "This video uses {codec}, which Telegram can't play. Making it playable would mean re-encoding it, which this bot doesn't do."
+unknown_codec = "an unknown codec"
+repack_failed = "Repacking that video failed. It may be damaged."
+prepare_failed = "Something went wrong preparing that file."
+too_big = "Made playable, that file would be {size}, over the {limit} Telegram allows."
+converter_down = "⚠️ The video converter isn't available right now. Please try again later."
+flood = "⚠️ Telegram is limiting this bot right now. Try again in {wait}."
+refused = "⚠️ Telegram refused that request. Please try again later."
+crashed = "⚠️ Something went wrong on our side. Please try again later."
+
+[progress]
+downloading = "⬇️ Downloading <b>{name}</b>"
+uploading = "⬆️ Uploading <b>{name}</b>"
+repacking = "🎬 Repacking <b>{name}</b> for streaming"
+amount = "{done} of {total}"
+with_speed = "{amount} · {speed}"
+
+[usage]
+today = "Today"
+month = "This month"
+line = "{period}: {files}, {volume}"
+files = { one = "{count} file", other = "{count} files" }
+files_of = { one = "{used} of {count} file", other = "{used} of {count} files" }
+volume_of = "{used} of {limit}"
+
+[limit]
+day_files = { one = "You've reached today's limit of {count} file. It resets in {wait}.", other = "You've reached today's limit of {count} files. It resets in {wait}." }
+month_files = { one = "You've reached this month's limit of {count} file. It resets in {wait}.", other = "You've reached this month's limit of {count} files. It resets in {wait}." }
+day_volume = "That file would take you past today's limit of {limit} (you've used {used}). It resets in {wait}."
+month_volume = "That file would take you past this month's limit of {limit} (you've used {used}). It resets in {wait}."
+
+[admin]
+title = "<b>Admin panel</b>"
+running = "Running: {count} of {workers}"
+waiting = "Waiting: {count} (at most {limit})"
+menus = "Open menus: {count}"
+users = "Users: {count}, {active} active this month"
+cached = "Cached files: {count}"
+backups = "Backups: {state}"
+on = "on"
+off = "off"
+cache = "🗄 Cache: {state}"
+join = "🔒 Join required: {state}"
+broadcast = "📣 Broadcast"
+backup_now = "💾 Backup now"
+refresh = "🔄 Refresh"
+cache_off = "Cache is off. Files already in the channel stay there."
+cache_on = "Cache is on."
+cache_unset = "Set CACHE_CHANNEL_ID first, then restart the bot."
+join_off = "Users no longer have to join the channel."
+join_on = "Users now have to join the channel first."
+join_unset = "Set JOIN_CHANNEL first, then restart the bot."
+backup_sending = "Sending a backup…"
+backup_sent = { one = "Backup sent to {sent} of {count} admin.", other = "Backup sent to {sent} of {count} admins." }
+post_check = "Checking I can post here."
+
+[broadcast]
+prompt = """Send me the message to broadcast: text, a photo, a video, a file, anything.
+Nothing is sent until you confirm."""
+confirm = { one = "Send this message to {count} person?", other = "Send this message to {count} people?" }
+send = "✅ Send"
+cancelled = "Broadcast cancelled."
+busy = "A broadcast is already running."
+deleted = "That message has been deleted."
+started = "Broadcasting…"
+progress = "Broadcasting… {tally}"
+failed = "The broadcast failed. See the logs."
+finished = "Broadcast finished. {tally}."
+tally = "{done} of {total}: {sent} sent, {unreachable} unreachable, {failed} failed"
+stopped = "{tally}. Stopped early: Telegram asked the bot to wait too long"
+
+[backup]
+off = "off"
+schedule = "every {hours} h, {last}"
+never = "never delivered"
+last = "last delivered {ago}"
+just_now = "just now"
+minutes_ago = { one = "{count} min ago", other = "{count} min ago" }
+hours_ago = { one = "{count} h ago", other = "{count} h ago" }
+days_ago = { one = "{count} day ago", other = "{count} days ago" }
+caption = "Backup of the DoctoVid database. {users} users, {active} active this month."
+
+[channel]
+not_found = "I can't find that channel. Check the bot is an admin there, then post any message in the channel so I see it, and try again. Still failing? Check the id."
+not_allowed = "I'm in that channel, but not allowed to do this. {fix}"
+refused = "Telegram refused: {error}"
+fix_posting = "Give the bot the right to post messages there."
+fix_members = "Make the bot an admin there: only admins can see who is a member."
+bot_missing = "The bot isn't in that channel. Add it as an admin, then try again."

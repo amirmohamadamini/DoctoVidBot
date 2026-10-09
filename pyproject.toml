@@ -39,6 +39,8 @@ select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ASYNC", "PT", "PL"]
 # ASYNC240: the only blocking path calls here are single stat()s and unlinks,
 # which take microseconds; wrapping each in a thread would cost more.
 ignore = ["PLR0913", "PLR2004", "PLR0911", "ASYNC240"]
+# Persian digits and separators, which the Persian tests are about.
+allowed-confusables = ["۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷", "۸", "۹", "٫", "٪"]
 
 [tool.mypy]
 strict = true
