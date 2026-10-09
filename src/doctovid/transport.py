@@ -45,9 +45,6 @@ class Key(NamedTuple):
 
 Keyboard = Sequence[Sequence[Key]]
 
-#: Shown in the empty message box while the keyboard is up.
-INPUT_PLACEHOLDER = "Send a file…"
-
 
 class Transport(Protocol):
     async def download(
@@ -88,8 +85,11 @@ def to_buttons(keyboard: Keyboard | None) -> list[list[Any]] | None:
     return [[_button(key) for key in row] for row in keyboard]
 
 
-def to_keyboard(rows: Sequence[Sequence[tuple[str, Style | None]]]) -> list[list[Any]]:
-    """A keyboard under the message box. Each tap sends its label as a message."""
+def to_keyboard(
+    rows: Sequence[Sequence[tuple[str, Style | None]]], placeholder: str
+) -> list[list[Any]]:
+    """A keyboard under the message box. Each tap sends its label as a message.
+    `placeholder` is shown in the empty message box while it is up."""
     return [
         [
             Button.text(
@@ -97,7 +97,7 @@ def to_keyboard(rows: Sequence[Sequence[tuple[str, Style | None]]]) -> list[list
                 style=style,
                 resize=True,
                 persistent=True,
-                placeholder=INPUT_PLACEHOLDER,
+                placeholder=placeholder,
             )
             for label, style in row
         ]

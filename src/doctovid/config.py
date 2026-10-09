@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from . import i18n
 from .quota import Limits
 
 #: Telegram's ceiling for a file a bot uploads: 4000 parts of 512 KiB.
@@ -47,6 +48,7 @@ class Config:
     user_limits: Limits
     admin_limits: Limits
     timezone: str
+    default_language: str
     log_level: str
 
     def limits_for(self, user_id: int) -> Limits:
@@ -145,6 +147,13 @@ class _Reader:
             self.problems.append(f"{key} must be one of {', '.join(allowed)}, got {value!r}")
         return value
 
+    def language(self, key: str, default: str) -> str:
+        code = self.text(key, default).lower()
+        available = i18n.available()
+        if code not in available:
+            self.problems.append(f"{key} must be one of {', '.join(available)}, got {code!r}")
+        return code
+
     def zone(self, key: str, default: str) -> str:
         name = self.text(key, default)
         try:
@@ -211,6 +220,7 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         user_limits=read.limits("USER", 20, 300, 10, 100),
         admin_limits=read.limits("ADMIN", 100, 2000, 50, 500),
         timezone=read.zone("TIMEZONE", "UTC"),
+        default_language=read.language("DEFAULT_LANGUAGE", i18n.REFERENCE),
         log_level=read.choice("LOG_LEVEL", "INFO", LOG_LEVELS),
     )
     if read.problems:

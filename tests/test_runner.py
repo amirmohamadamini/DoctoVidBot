@@ -8,13 +8,14 @@ from telethon.errors import FloodWaitError
 
 from doctovid import media
 from doctovid.config import Config
+from doctovid.i18n import RLM
 from doctovid.jobs import Mode
 from doctovid.quota import Calendar, Usage
 from doctovid.runner import DISK_MARGIN_BYTES, Runner
 from doctovid.store import Store
 from doctovid.tools import LocalTools
 
-from .conftest import FakeTransport, MakeClip, make_job, make_request, needs_ffmpeg
+from .conftest import FA, FakeTransport, MakeClip, bare, make_job, make_request, needs_ffmpeg
 
 
 @pytest.fixture
@@ -162,8 +163,38 @@ async def test_a_playable_video_is_cached_and_served_again(
     assert telegram.copies[-1] == (config.cache_channel_id, store.cached("555:video"), 43)
 
 
+@pytest.mark.usefixtures("movie")
+async def test_a_video_sent_back_as_a_file_is_cached_too(
+    runner: Runner, telegram: FakeTransport, store: Store, config: Config
+) -> None:
+    store.set_cache_enabled(True)
+
+    await runner(make_job(make_request("movie.mp4"), mode=Mode.FILE))
+    assert telegram.uploads[0].video is None
+    assert store.cached("555:file") is not None
+    assert store.cached("555:video") is None
+
+    await runner(make_job(make_request("movie.mp4", user_id=43), mode=Mode.FILE))
+    assert len(telegram.uploads) == 1
+    assert telegram.copies[-1] == (config.cache_channel_id, store.cached("555:file"), 43)
+
+
+@needs_ffmpeg
+@pytest.mark.usefixtures("movie")
+async def test_a_cached_file_is_not_handed_out_as_the_playable_video(
+    runner: Runner, telegram: FakeTransport, store: Store
+) -> None:
+    store.set_cache_enabled(True)
+    store.remember("555:file", 77)
+
+    await runner(make_job(make_request("movie.mp4")))
+    assert len(telegram.uploads) == 1
+    assert telegram.uploads[0].video is not None
+    assert all(message_id != 77 for _, message_id, _ in telegram.copies)
+
+
 @pytest.mark.usefixtures("pdf")
-async def test_a_file_sent_back_as_it_is_is_never_cached(
+async def test_a_document_sent_back_as_it_is_is_never_cached(
     runner: Runner, telegram: FakeTransport, store: Store
 ) -> None:
     # Most likely a private document, and re-sending it costs nothing anyway.
@@ -221,7 +252,7 @@ async def test_a_floodwait_tells_the_user_how_long(
 
     monkeypatch.setattr(telegram, "upload", limited)
     await runner(make_job(make_request("doc.pdf", is_video=False), mode=Mode.FILE))
-    assert "Try again in 1:30" in telegram.edits[-1]
+    assert "Try again in 2 min." in telegram.edits[-1]
 
 
 @pytest.mark.usefixtures("pdf")
@@ -330,3 +361,21 @@ async def test_a_compromised_worker_cannot_get_the_session_uploaded(
     assert all(b"auth key" not in upload.content for upload in telegram.uploads)
     assert telegram.uploads == []
     assert "Something went wrong preparing that file" in telegram.edits[-1]
+
+
+@pytest.mark.usefixtures("pdf")
+async def test_a_persian_speaker_is_answered_in_persian(
+    config: Config, store: Store, telegram: FakeTransport
+) -> None:
+    runner = Runner(config, store, telegram, locale_for=lambda _user_id: FA)
+    await runner(make_job(make_request("doc.pdf", is_video=False), mode=Mode.FILE))
+    assert bare(telegram.edits[0]) == "⬇️ در حال دریافت <b>doc.pdf</b>…"
+    assert telegram.edits[0].startswith(RLM)
+
+
+async def test_a_failure_is_explained_in_persian(
+    config: Config, store: Store, telegram: FakeTransport
+) -> None:
+    runner = Runner(config, store, telegram, locale_for=lambda _user_id: FA)
+    await runner(make_job(make_request("gone.pdf", is_video=False), mode=Mode.FILE))
+    assert bare(telegram.edits[-1]) == "⚠️ " + bare(FA.phrase("job.gone"))

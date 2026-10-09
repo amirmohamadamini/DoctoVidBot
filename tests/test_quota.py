@@ -7,6 +7,8 @@ import pytest
 
 from doctovid.quota import GB, Calendar, Limits, Usage, refusal, summary
 
+from .conftest import EN, FA, bare
+
 LIMITS = Limits(files_per_day=3, files_per_month=10, gb_per_day=2, gb_per_month=5)
 
 
@@ -20,7 +22,10 @@ CALENDAR = at(datetime(2026, 9, 24, 21, 30))
 def check(
     today: Usage, month: Usage | None = None, size: int = 1, limits: Limits = LIMITS
 ) -> str | None:
-    return refusal(limits, today=today, this_month=month or today, size=size, calendar=CALENDAR)
+    reason = refusal(
+        limits, today=today, this_month=month or today, size=size, calendar=CALENDAR, t=EN
+    )
+    return None if reason is None else bare(reason)
 
 
 def test_within_every_limit() -> None:
@@ -34,7 +39,7 @@ def test_the_daily_file_count() -> None:
 
 def test_the_monthly_file_count() -> None:
     reason = check(Usage(0, 0), Usage(10, 0))
-    assert reason == "You've reached this month's limit of 10 files. It resets on 1 October."
+    assert reason == "You've reached this month's limit of 10 files. It resets in 6 days 3 h."
 
 
 def test_the_daily_volume_counts_the_new_file() -> None:
@@ -72,8 +77,14 @@ def test_next_month(today: datetime, first_of_next: date) -> None:
 
 
 def test_summary() -> None:
-    text = summary(LIMITS, Usage(1, GB), Usage(4, 3 * GB))
+    text = bare(summary(LIMITS, Usage(1, GB), Usage(4, 3 * GB), EN))
     assert (
         text == "Today: 1 of 3 files, 1.0 GB of 2.0 GB\nThis month: 4 of 10 files, 3.0 GB of 5.0 GB"
     )
-    assert summary(Limits(0, 0, 0, 0), Usage(1, 0), Usage(1, 0)).startswith("Today: 1 files, 0 B")
+    unlimited = bare(summary(Limits(0, 0, 0, 0), Usage(1, 0), Usage(2, 0), EN))
+    assert unlimited == "Today: 1 file, 0 B\nThis month: 2 files, 0 B"
+
+
+def test_the_summary_in_persian() -> None:
+    text = bare(summary(LIMITS, Usage(1, GB), Usage(4, 3 * GB), FA))
+    assert text.splitlines()[0] == "امروز: ۱ از ۳ فایل، ۱٫۰ گیگابایت از ۲٫۰ گیگابایت"

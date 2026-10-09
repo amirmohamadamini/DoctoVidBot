@@ -17,6 +17,8 @@ from telethon.errors import (
 from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.tl.types import ChannelParticipantBanned, ChannelParticipantLeft
 
+from .i18n import Html, Locale
+
 log = logging.getLogger(__name__)
 
 #: How long a "yes, they're a member" answer is trusted. Asking Telegram on
@@ -25,12 +27,13 @@ log = logging.getLogger(__name__)
 MEMBER_TTL_S = 600.0
 
 
-#: What to tell an admin when the bot is in a channel without the right it needs.
-POSTING_FIX = "Give the bot the right to post messages there."
-MEMBERS_FIX = "Make the bot an admin there: only admins can see who is a member."
+#: What to tell an admin when the bot is in a channel without the right it
+#: needs: the keys of the messages.
+POSTING_FIX = "channel.fix_posting"
+MEMBERS_FIX = "channel.fix_members"
 
 
-def channel_problem(exc: BaseException, *, fix: str) -> str:
+def channel_problem(exc: BaseException, *, fix: str, t: Locale) -> Html:
     """What an admin should do about a channel the bot can't use, in words that
     fit a Telegram pop-up.
 
@@ -41,13 +44,10 @@ def channel_problem(exc: BaseException, *, fix: str) -> str:
     in the channel, so the advice names all three.
     """
     if isinstance(exc, ValueError | ChannelInvalidError | ChannelPrivateError):
-        return (
-            "I can't find that channel. Check the bot is an admin there, then post any "
-            "message in the channel so I see it, and try again. Still failing? Check the id."
-        )
+        return t.phrase("channel.not_found")
     if isinstance(exc, ChatAdminRequiredError | ChatWriteForbiddenError):
-        return f"I'm in that channel, but not allowed to do this. {fix}"
-    return f"Telegram refused: {exc}" if str(exc) else f"Telegram refused ({type(exc).__name__})"
+        return t.phrase("channel.not_allowed", fix=t.phrase(fix))
+    return t.phrase("channel.refused", error=str(exc) or type(exc).__name__)
 
 
 class Membership:
@@ -81,15 +81,15 @@ class Membership:
             self._confirmed.pop(user_id, None)
         return member
 
-    async def problem(self) -> str | None:
+    async def problem(self, t: Locale) -> Html | None:
         """Why the check can't work, or None. Asked about the bot itself, which
         is a member of the channel if it is set up correctly."""
         try:
             me = await self._client.get_me(input_peer=True)
             if not await self._ask(me):
-                return "The bot isn't in that channel. Add it as an admin, then try again."
+                return t.phrase("channel.bot_missing")
         except Exception as exc:
-            return channel_problem(exc, fix=MEMBERS_FIX)
+            return channel_problem(exc, fix=MEMBERS_FIX, t=t)
         return None
 
     async def _ask(self, user: Any) -> bool:

@@ -8,6 +8,8 @@ from telethon.tl.types import ChannelParticipant, ChannelParticipantLeft, PeerUs
 
 from doctovid.membership import MEMBER_TTL_S, Membership
 
+from .conftest import EN
+
 MEMBER = SimpleNamespace(participant=ChannelParticipant(user_id=1, date=None))
 LEFT = SimpleNamespace(participant=ChannelParticipantLeft(peer=PeerUser(1)))
 
@@ -57,7 +59,7 @@ async def test_a_broken_setup_lets_people_in() -> None:
 
 async def test_problem_reports_a_bot_that_is_not_an_admin() -> None:
     membership = Membership(FakeClient(ChatAdminRequiredError(request=None)), "news")
-    problem = await membership.problem()
+    problem = await membership.problem(EN)
     assert problem is not None
     assert "only admins can see who is a member" in problem
-    assert await Membership(FakeClient(MEMBER), "news").problem() is None
+    assert await Membership(FakeClient(MEMBER), "news").problem(EN) is None

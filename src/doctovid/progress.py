@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
-from html import escape
+
+from .i18n import Html, Locale
 
 BAR_WIDTH = 12
 
@@ -12,43 +13,27 @@ BAR_WIDTH = 12
 ProgressCallback = Callable[[int, int], Awaitable[None]]
 
 
-def size(n: float) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
-            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
-        n /= 1024
-    raise AssertionError("unreachable")
-
-
-def clock(seconds: float) -> str:
-    total = int(seconds)
-    hours, rest = divmod(total, 3600)
-    minutes, secs = divmod(rest, 60)
-    return f"{hours}:{minutes:02}:{secs:02}" if hours else f"{minutes}:{secs:02}"
-
-
-def bar(done: float, total: float) -> str:
+def bar(done: float, total: float, t: Locale) -> Html:
     fraction = min(1.0, done / total) if total > 0 else 0.0
     filled = round(fraction * BAR_WIDTH)
-    return f"{'▰' * filled}{'▱' * (BAR_WIDTH - filled)} {fraction:.0%}"
+    return Html(f"{'▰' * filled}{'▱' * (BAR_WIDTH - filled)} {t.percent(fraction)}")
 
 
-def transfer(verb: str, name: str, done: int, total: int, speed: float) -> str:
-    """`verb` is "⬇️ Downloading" or "⬆️ Uploading"; the numbers are bytes."""
-    lines = [f"{verb} <b>{escape(name)}</b>", bar(done, total), f"{size(done)} of {size(total)}"]
+def transfer(title: str, name: str, done: int, total: int, *, speed: float, t: Locale) -> Html:
+    """`title` is `progress.downloading` or `progress.uploading`; the numbers are bytes."""
+    amount = t.phrase("progress.amount", done=t.size(done), total=t.size(total))
     if speed > 0:
-        lines[-1] += f" · {size(speed)}/s"
-    return "\n".join(lines)
+        amount = t.phrase("progress.with_speed", amount=amount, speed=t.speed(speed))
+    return t.lines(t.phrase(title, name=name), bar(done, total, t), amount)
 
 
-def remux(name: str, done_s: int, total_s: int) -> str:
-    return "\n".join(
-        [
-            f"🎬 Repacking <b>{escape(name)}</b> for streaming",
-            bar(done_s, total_s),
-            f"{clock(done_s)} of {clock(total_s)}" if total_s else clock(done_s),
-        ]
+def remux(name: str, done_s: int, total_s: int, t: Locale) -> Html:
+    amount = (
+        t.phrase("progress.amount", done=t.clock(done_s), total=t.clock(total_s))
+        if total_s
+        else t.clock(done_s)
     )
+    return t.lines(t.phrase("progress.repacking", name=name), bar(done_s, total_s, t), amount)
 
 
 class Throttle:

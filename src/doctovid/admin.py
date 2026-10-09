@@ -12,17 +12,12 @@ from telethon import events
 from .backup import Backups
 from .broadcast import Broadcaster, Tally
 from .config import Config
+from .i18n import Html, Locale, plain
 from .membership import POSTING_FIX, Membership, channel_problem
-from .menus import KEYBOARD_LABELS
 from .store import Store
 from .transport import DANGER, PRIMARY, SUCCESS, Key, Keyboard, Style, to_buttons
 
 log = logging.getLogger(__name__)
-
-BROADCAST_PROMPT = (
-    "Send me the message to broadcast: text, a photo, a video, a file, anything.\n"
-    "Nothing is sent until you confirm."
-)
 
 #: Telegram cuts a button's pop-up answer off at 200 characters.
 ALERT_LIMIT = 200
@@ -38,7 +33,9 @@ class Admin:
         broadcaster: Broadcaster,
         backups: Backups,
         membership: Membership | None,
-        activity: Callable[[], str],
+        activity: Callable[[Locale], Html],
+        locale_for: Callable[[int], Locale],
+        is_keyboard_label: Callable[[str], bool],
     ) -> None:
         self._client = client
         self._config = config
@@ -47,6 +44,8 @@ class Admin:
         self._backups = backups
         self._membership = membership
         self._activity = activity
+        self._locale_for = locale_for
+        self._is_keyboard_label = is_keyboard_label
         #: Admins the bot is waiting on for a message to broadcast.
         self._drafting: set[int] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -94,37 +93,54 @@ class Admin:
     # ------------------------------------------------------------ the panel
 
     async def open_panel(self, event: Any) -> None:
-        text, keyboard = self.panel()
+        text, keyboard = self.panel(self._t(event))
         await event.respond(text, buttons=to_buttons(keyboard))
 
-    def panel(self) -> tuple[str, Keyboard]:
+    def panel(self, t: Locale) -> tuple[Html, Keyboard]:
         users, active = self._store.user_counts()
-        text = "\n".join(
-            [
-                "<b>Admin panel</b>",
-                "",
-                self._activity(),
-                f"Users: {users}, {active} active this month",
-                f"Cached files: {self._store.cache_size()}",
-                f"Backups: {self._backups.describe()}",
-            ]
+        text = t.lines(
+            t.phrase("admin.title"),
+            Html(""),
+            self._activity(t),
+            t.phrase("admin.users", count=users, active=active),
+            t.phrase("admin.cached", count=self._store.cache_size()),
+            t.phrase("admin.backups", state=self._backups.describe(t)),
         )
         cache, joining = self.cache_on(), self.is_joining_required()
         keyboard = [
-            [Key(f"🗄 Cache: {_state(cache)}", "adm:cache", _switch_style(cache))],
-            [Key(f"🔒 Join required: {_state(joining)}", "adm:join", _switch_style(joining))],
-            [Key("📣 Broadcast", "adm:cast", PRIMARY), Key("💾 Backup now", "adm:backup")],
-            [Key("🔄 Refresh", "adm:panel")],
+            [
+                Key(
+                    t.label("admin.cache", state=_state(cache, t)),
+                    "adm:cache",
+                    _switch_style(cache),
+                )
+            ],
+            [
+                Key(
+                    t.label("admin.join", state=_state(joining, t)),
+                    "adm:join",
+                    _switch_style(joining),
+                )
+            ],
+            [
+                Key(t.label("admin.broadcast"), "adm:cast", PRIMARY),
+                Key(t.label("admin.backup_now"), "adm:backup"),
+            ],
+            [Key(t.label("admin.refresh"), "adm:panel")],
         ]
         return text, keyboard
 
+    def _t(self, event: Any) -> Locale:
+        return self._locale_for(event.sender_id)
+
     async def _refresh(self, event: Any) -> None:
-        text, keyboard = self.panel()
+        text, keyboard = self.panel(self._t(event))
         # Refreshing a panel that hasn't changed is an error to Telegram.
         await _quietly(event.edit(text, buttons=to_buttons(keyboard)))
 
     async def _on_button(self, event: Any) -> None:
         action, _, argument = event.data.decode().removeprefix("adm:").partition(":")
+        t = self._t(event)
         match action:
             case "panel":
                 await event.answer()
@@ -139,60 +155,64 @@ class Admin:
                 self._drafting.add(event.sender_id)
                 await event.answer()
                 await event.respond(
-                    BROADCAST_PROMPT,
-                    buttons=to_buttons([[Key("✖️ Cancel", "adm:nocast", DANGER)]]),
+                    t.text("broadcast.prompt"),
+                    buttons=to_buttons([[Key(t.label("menu.cancel"), "adm:nocast", DANGER)]]),
                 )
             case "send":
                 await self._confirm_broadcast(event, int(argument))
             case "nocast":
                 self._drafting.discard(event.sender_id)
-                await event.edit("Broadcast cancelled.")
+                await event.edit(t.text("broadcast.cancelled"))
             case _:
                 await event.answer()
 
     async def _toggle_cache(self, event: Any) -> None:
+        t = self._t(event)
         channel = self._config.cache_channel_id
         if self.cache_on():
             self._store.set_cache_enabled(False)
-            await event.answer("Cache is off. Files already in the channel stay there.")
+            await event.answer(t.alert("admin.cache_off"))
         elif channel is None:
-            await event.answer("Set CACHE_CHANNEL_ID first, then restart the bot.", alert=True)
+            await event.answer(t.alert("admin.cache_unset"), alert=True)
             return
-        elif problem := await self._check_posting(channel):
-            await _alert(event, problem)
+        elif problem := await self._check_posting(channel, t):
+            await _alert(event, t, problem)
             return
         else:
             self._store.set_cache_enabled(True)
-            await event.answer("Cache is on.")
+            await event.answer(t.alert("admin.cache_on"))
         await self._refresh(event)
 
     async def _toggle_join(self, event: Any) -> None:
+        t = self._t(event)
         if self.is_joining_required():
             self._store.set_switch("join", False)
-            await event.answer("Users no longer have to join the channel.")
+            await event.answer(t.alert("admin.join_off"))
         elif self._membership is None:
-            await event.answer("Set JOIN_CHANNEL first, then restart the bot.", alert=True)
+            await event.answer(t.alert("admin.join_unset"), alert=True)
             return
-        elif problem := await self._membership.problem():
-            await _alert(event, problem)
+        elif problem := await self._membership.problem(t):
+            await _alert(event, t, problem)
             return
         else:
             self._store.set_switch("join", True)
-            await event.answer("Users now have to join the channel first.")
+            await event.answer(t.alert("admin.join_on"))
         await self._refresh(event)
 
     async def _backup(self, event: Any) -> None:
-        await event.answer("Sending a backup…")
+        t = self._t(event)
+        await event.answer(t.alert("admin.backup_sending"))
         delivered = await self._backups.send()
-        await event.respond(f"Backup sent to {delivered} of {len(self._config.admin_ids)} admins.")
+        admins = len(self._config.admin_ids)
+        await event.respond(t.text("admin.backup_sent", sent=delivered, count=admins))
 
-    async def _check_posting(self, channel: int) -> str | None:
+    async def _check_posting(self, channel: int, t: Locale) -> Html | None:
         """There is no read-only way to learn whether a bot may post somewhere."""
         try:
-            probe = await self._client.send_message(channel, "Checking I can post here.")
+            probe = await self._client.send_message(channel, t.text("admin.post_check"))
             await self._client.delete_messages(channel, [probe.id])
         except Exception as exc:
-            return channel_problem(exc, fix=POSTING_FIX)
+            return channel_problem(exc, fix=POSTING_FIX, t=t)
         return None
 
     # ------------------------------------------------------------ broadcast
@@ -204,52 +224,54 @@ class Admin:
         return (
             bool(event.is_private)
             and event.sender_id in self._drafting
-            and text not in KEYBOARD_LABELS
+            and not self._is_keyboard_label(text)
             and not text.startswith("/")
         )
 
     async def _on_draft(self, event: Any) -> None:
         self._drafting.discard(event.sender_id)
+        t = self._t(event)
         if self._broadcaster.running:
-            await event.reply("A broadcast is already running.")
+            await event.reply(t.text("broadcast.busy"))
             return
         count = len(self._store.reachable_users())
         buttons = [
             [
-                Key("✅ Send", f"adm:send:{event.message.id}", SUCCESS),
-                Key("✖️ Cancel", "adm:nocast", DANGER),
+                Key(t.label("broadcast.send"), f"adm:send:{event.message.id}", SUCCESS),
+                Key(t.label("menu.cancel"), "adm:nocast", DANGER),
             ]
         ]
-        await event.reply(f"Send this message to {count} people?", buttons=to_buttons(buttons))
+        await event.reply(t.text("broadcast.confirm", count=count), buttons=to_buttons(buttons))
 
     async def _confirm_broadcast(self, event: Any, message_id: int) -> None:
+        t = self._t(event)
         if self._broadcaster.running:
-            await event.answer("A broadcast is already running.", alert=True)
+            await event.answer(t.alert("broadcast.busy"), alert=True)
             return
         message = await self._client.get_messages(event.chat_id, ids=message_id)
         if message is None:
-            await event.edit("That message has been deleted.")
+            await event.edit(t.text("broadcast.deleted"))
             return
-        await event.edit("Broadcasting…")
-        task = asyncio.create_task(self._broadcast(event, message))
+        await event.edit(t.text("broadcast.started"))
+        task = asyncio.create_task(self._broadcast(event, message, t))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _broadcast(self, event: Any, message: Any) -> None:
+    async def _broadcast(self, event: Any, message: Any, t: Locale) -> None:
         async def report(tally: Tally) -> None:
-            await _quietly(event.edit(f"Broadcasting… {tally.describe()}"))
+            await _quietly(event.edit(t.text("broadcast.progress", tally=tally.describe(t))))
 
         try:
             tally = await self._broadcaster.send(message, report)
         except Exception:
             log.exception("broadcast failed")
-            await _quietly(event.edit("The broadcast failed. See the logs."))
+            await _quietly(event.edit(t.text("broadcast.failed")))
             return
-        await _quietly(event.edit(f"Broadcast finished. {tally.describe()}."))
+        await _quietly(event.edit(t.text("broadcast.finished", tally=tally.describe(t))))
 
 
-def _state(on: bool) -> str:
-    return "on" if on else "off"
+def _state(on: bool, t: Locale) -> Html:
+    return t.word("admin.on" if on else "admin.off")
 
 
 def _switch_style(on: bool) -> Style | None:
@@ -257,8 +279,8 @@ def _switch_style(on: bool) -> Style | None:
     return SUCCESS if on else None
 
 
-async def _alert(event: Any, text: str) -> None:
-    await event.answer(text[:ALERT_LIMIT], alert=True)
+async def _alert(event: Any, t: Locale, problem: Html) -> None:
+    await event.answer(plain(t.lines(problem))[:ALERT_LIMIT], alert=True)
 
 
 async def _quietly(edit: Awaitable[Any]) -> None:

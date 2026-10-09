@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS users (
     user_id    INTEGER PRIMARY KEY,
     first_seen INTEGER NOT NULL,
     last_seen  INTEGER NOT NULL,
-    blocked    INTEGER NOT NULL DEFAULT 0
+    blocked    INTEGER NOT NULL DEFAULT 0,
+    language   TEXT
 );
 CREATE TABLE IF NOT EXISTS usage (
     user_id INTEGER NOT NULL,
@@ -39,6 +40,13 @@ class Store:
     def __init__(self, path: Path | str) -> None:
         self._db = sqlite3.connect(path, isolation_level=None)
         self._db.executescript(_SCHEMA)
+        self._upgrade()
+
+    def _upgrade(self) -> None:
+        """Columns added since the first release, for a database made before."""
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(users)")}
+        if "language" not in columns:
+            self._db.execute("ALTER TABLE users ADD COLUMN language TEXT")
 
     def close(self) -> None:
         self._db.close()
@@ -125,6 +133,21 @@ class Store:
             "INSERT INTO users (user_id, first_seen, last_seen) VALUES (?, ?, ?) "
             "ON CONFLICT (user_id) DO UPDATE SET last_seen = excluded.last_seen, blocked = 0",
             (user_id, now, now),
+        )
+
+    def language(self, user_id: int) -> str | None:
+        """The language someone chose, or None if they haven't yet."""
+        row = self._db.execute(
+            "SELECT language FROM users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return None if row is None or row[0] is None else str(row[0])
+
+    def set_language(self, user_id: int, code: str) -> None:
+        now = int(time.time())
+        self._db.execute(
+            "INSERT INTO users (user_id, first_seen, last_seen, language) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (user_id) DO UPDATE SET language = excluded.language",
+            (user_id, now, now, code),
         )
 
     def reachable_users(self) -> list[int]:

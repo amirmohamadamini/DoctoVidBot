@@ -7,6 +7,8 @@ from telethon.errors import FloodWaitError, RPCError, UserIsBlockedError
 from doctovid.broadcast import MAX_WAIT_S, Broadcaster, Tally
 from doctovid.store import Store
 
+from .conftest import EN
+
 
 class FakeClient:
     def __init__(self, failures: dict[int, list[Exception]] | None = None) -> None:
@@ -71,7 +73,7 @@ async def test_a_very_long_floodwait_stops_the_broadcast(store: Store) -> None:
     tally, _ = await run(client, store)
     assert client.delivered == []
     assert tally.stopped
-    assert "Stopped early" in tally.describe()
+    assert "Stopped early" in tally.describe(EN)
 
 
 async def test_other_errors_are_counted_and_skipped(store: Store) -> None:

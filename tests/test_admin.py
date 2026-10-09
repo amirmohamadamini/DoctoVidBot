@@ -11,8 +11,11 @@ from doctovid.admin import Admin
 from doctovid.backup import Backups
 from doctovid.broadcast import Broadcaster
 from doctovid.config import Config
-from doctovid.menus import HELP_BUTTON
+from doctovid.i18n import Html
+from doctovid.menus import keyboard_actions
 from doctovid.store import Store
+
+from .conftest import EN, FA, LOCALES, bare
 
 
 class Chat:
@@ -68,8 +71,7 @@ def client() -> FakeClient:
     return FakeClient()
 
 
-@pytest.fixture
-def admin(client: FakeClient, config: Config, store: Store, tmp_path: Path) -> Admin:
+def build_admin(client: FakeClient, config: Config, store: Store, tmp_path: Path) -> Admin:
     async def no_sleep(seconds: float) -> None:
         pass
 
@@ -79,11 +81,23 @@ def admin(client: FakeClient, config: Config, store: Store, tmp_path: Path) -> A
         store,
         broadcaster=Broadcaster(client, store, sleep=no_sleep),
         backups=Backups(
-            client, store, admins=config.admin_ids, interval_hours=12, directory=tmp_path
+            client,
+            store,
+            admins=config.admin_ids,
+            interval_hours=12,
+            directory=tmp_path,
+            locale_for=lambda _admin: EN,
         ),
         membership=None,
-        activity=lambda: "Running: 0 of 2",
+        activity=lambda t: Html("Running: 0 of 2"),
+        locale_for=lambda user_id: LOCALES.get(store.language(user_id)),
+        is_keyboard_label=keyboard_actions(LOCALES).__contains__,
     )
+
+
+@pytest.fixture
+def admin(client: FakeClient, config: Config, store: Store, tmp_path: Path) -> Admin:
+    return build_admin(client, config, store, tmp_path)
 
 
 async def tap(admin: Admin, data: str, sender: int = 7) -> Chat:
@@ -99,9 +113,9 @@ def labels(buttons: Any) -> list[str]:
 
 def test_the_panel_shows_the_state_of_things(admin: Admin, store: Store) -> None:
     store.seen(42)
-    text, keyboard = admin.panel()
-    assert "Users: 1, 1 active this month" in text
-    assert "Backups: every 12 h, never delivered" in text
+    text, keyboard = admin.panel(EN)
+    assert "Users: 1, 1 active this month" in bare(text)
+    assert "Backups: every 12 h, never delivered" in bare(text)
     assert [key.label for row in keyboard for key in row] == [
         "🗄 Cache: off",
         "🔒 Join required: off",
@@ -139,7 +153,7 @@ async def test_join_needs_a_channel_first(admin: Admin, store: Store) -> None:
 async def test_backup_button(admin: Admin, client: FakeClient) -> None:
     event = await tap(admin, "adm:backup")
     assert client.files == [7]
-    assert event.said == ["Backup sent to 1 of 1 admins."]
+    assert [bare(text) for text in event.said] == ["Backup sent to 1 of 1 admin."]
 
 
 async def test_broadcast_asks_for_the_message_then_confirms(
@@ -149,21 +163,24 @@ async def test_broadcast_asks_for_the_message_then_confirms(
         store.seen(user_id)
 
     await tap(admin, "adm:cast")
-    assert not admin._is_draft(Chat(7, text=HELP_BUTTON))
+    assert not admin._is_draft(Chat(7, text=EN.label("keyboard.help")))
+    assert not admin._is_draft(Chat(7, text=FA.label("keyboard.help")))
     assert not admin._is_draft(Chat(42, text="hello"))
 
     draft = Chat(7, text="Big news", message_id=55)
     assert admin._is_draft(draft)
     with pytest.raises(events.StopPropagation):
         await admin._admins_only(admin._on_draft)(draft)
-    assert draft.said == ["Send this message to 3 people?"]
+    assert [bare(text) for text in draft.said] == ["Send this message to 3 people?"]
     assert draft.buttons[0][0].type.data == b"adm:send:55"
 
     confirm = await tap(admin, "adm:send:55")
     for task in list(admin._tasks):
         await task
     assert client.copied == [1, 2, 3]
-    assert confirm.edited[-1] == "Broadcast finished. 3 of 3: 3 sent, 0 unreachable, 0 failed."
+    assert (
+        bare(confirm.edited[-1]) == "Broadcast finished. 3 of 3: 3 sent, 0 unreachable, 0 failed."
+    )
 
 
 async def test_a_broadcast_can_be_cancelled(admin: Admin) -> None:
@@ -182,21 +199,24 @@ class UnseenChannelClient(FakeClient):
 async def test_an_unseen_channel_gets_advice_not_telethons_error(
     config: Config, store: Store, tmp_path: Path
 ) -> None:
-    client = UnseenChannelClient()
-    admin = Admin(
-        client,
-        config,
-        store,
-        broadcaster=Broadcaster(client, store),
-        backups=Backups(
-            client, store, admins=config.admin_ids, interval_hours=12, directory=tmp_path
-        ),
-        membership=None,
-        activity=lambda: "",
-    )
+    admin = build_admin(UnseenChannelClient(), config, store, tmp_path)
     event = await tap(admin, "adm:cache")
 
     assert "post any message in the channel" in event.answers[0]
     assert "input entity" not in event.answers[0]
     assert len(event.answers[0]) <= 200
     assert not store.cache_enabled()
+
+
+def test_the_panel_speaks_the_admins_language(admin: Admin, store: Store) -> None:
+    store.set_language(7, "fa")
+    text, keyboard = admin.panel(FA)
+    assert "پنل مدیریت" in text
+    assert "🗄 کش: خاموش" in [key.label for row in keyboard for key in row]
+
+
+async def test_answers_follow_the_admins_language(admin: Admin, store: Store) -> None:
+    store.set_language(7, "fa")
+    event = await tap(admin, "adm:join")
+    assert "JOIN_CHANNEL" in event.answers[0]
+    assert event.answers[0] == FA.alert("admin.join_unset")

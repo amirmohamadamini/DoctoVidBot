@@ -9,6 +9,8 @@ from typing import Any
 from doctovid.backup import DATABASE_NAME, Backups, make_backup
 from doctovid.store import Store
 
+from .conftest import EN, bare
+
 
 class FakeClient:
     def __init__(self, unreachable: frozenset[int] = frozenset()) -> None:
@@ -33,6 +35,7 @@ def backups(
         directory=tmp_path / "backups",
         now=lambda: clock[0],
         calendar_now=lambda: datetime(2026, 9, 24, 12, 0),
+        locale_for=lambda _admin: EN,
         **options,
     )
 
@@ -88,11 +91,11 @@ async def test_last_delivered_is_tracked_apart_from_last_attempted(
     clock = [1_000_000.0]
     nobody_home = backups(store, FakeClient(unreachable=frozenset({1, 2})), tmp_path, clock)
     assert await nobody_home.send() == 0
-    assert nobody_home.describe() == "every 12 h, never delivered"
+    assert bare(nobody_home.describe(EN)) == "every 12 h, never delivered"
     assert not nobody_home.due()
 
     clock[0] += 13 * 3600
     working = backups(store, FakeClient(), tmp_path, clock)
     await working.send()
     clock[0] += 3 * 3600
-    assert working.describe() == "every 12 h, last delivered 3 h ago"
+    assert bare(working.describe(EN)) == "every 12 h, last delivered 3 h ago"

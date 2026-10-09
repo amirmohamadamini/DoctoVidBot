@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .i18n import Html, Locale
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class Backups:
         directory: Path,
         now: Callable[[], float] = time.time,
         calendar_now: Callable[[], datetime] = datetime.now,
+        locale_for: Callable[[int], Locale],
     ) -> None:
         self._client = client
         self._store = store
@@ -56,6 +58,7 @@ class Backups:
         self._directory = directory
         self._now = now
         self._calendar_now = calendar_now
+        self._locale_for = locale_for
 
     @property
     def enabled(self) -> bool:
@@ -67,12 +70,16 @@ class Backups:
         value = self._store.setting("last_backup_delivered")
         return None if value is None else float(value)
 
-    def describe(self) -> str:
+    def describe(self, t: Locale) -> Html:
         if not self.enabled:
-            return "off"
+            return t.phrase("backup.off")
         when = self.last_delivered()
-        last = "never delivered" if when is None else f"last delivered {_ago(self._now() - when)}"
-        return f"every {self._interval_s // 3600} h, {last}"
+        last = (
+            t.phrase("backup.never")
+            if when is None
+            else t.phrase("backup.last", ago=_ago(self._now() - when, t))
+        )
+        return t.phrase("backup.schedule", hours=self._interval_s // 3600, last=last)
 
     def due(self) -> bool:
         last = float(self._store.setting("last_backup") or 0)
@@ -95,11 +102,13 @@ class Backups:
         self._directory.mkdir(parents=True, exist_ok=True)
         archive = make_backup(self._store, self._directory, self._calendar_now())
         users, active = self._store.user_counts()
-        caption = f"Backup of the DoctoVid database. {users} users, {active} active this month."
         delivered = 0
         try:
             for admin in sorted(self._admins):
                 try:
+                    caption = self._locale_for(admin).text(
+                        "backup.caption", users=users, active=active
+                    )
                     await self._client.send_file(
                         admin, str(archive), caption=caption, force_document=True
                     )
@@ -118,11 +127,13 @@ class Backups:
         return delivered
 
 
-def _ago(seconds: float) -> str:
+def _ago(seconds: float, t: Locale) -> Html:
     minutes = int(seconds // 60)
     if minutes < 1:
-        return "just now"
+        return t.phrase("backup.just_now")
     if minutes < 60:
-        return f"{minutes} min ago"
+        return t.phrase("backup.minutes_ago", count=minutes)
     hours = minutes // 60
-    return f"{hours} h ago" if hours < 48 else f"{hours // 24} days ago"
+    if hours < 48:
+        return t.phrase("backup.hours_ago", count=hours)
+    return t.phrase("backup.days_ago", count=hours // 24)

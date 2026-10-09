@@ -22,7 +22,7 @@ from doctovid.bot import (
 from doctovid.config import Config, load
 from doctovid.store import Store
 
-from .conftest import MakeClip, needs_ffmpeg
+from .conftest import FA, MakeClip, bare, needs_ffmpeg
 
 
 @dataclass
@@ -68,6 +68,7 @@ class Event:
         self.data = data.encode()
         self.raw_text = getattr(message, "raw_text", "")
         self.answers: list[str] = []
+        self.edited: list[str] = []
         self._client = client
 
     async def reply(self, text: str, **kwargs: Any) -> Sent:
@@ -77,6 +78,9 @@ class Event:
 
     async def answer(self, text: str = "", **kwargs: Any) -> None:
         self.answers.append(text)
+
+    async def edit(self, text: str, **kwargs: Any) -> None:
+        self.edited.append(text)
 
 
 def document(name: str, size: int = 1000, mime: str = "video/x-matroska") -> Any:
@@ -146,7 +150,7 @@ async def test_choosing_an_action_queues_a_job(bot: Bot, client: FakeClient) -> 
     await bot._on_message(Event(client, 42, document("film.mkv")))
     await bot._on_button(Event(client, 42, data="video:1"))
     assert bot._queue.waiting == 1
-    assert client.edits[client.sent[0].id].startswith("⏳ Starting")
+    assert bare(client.edits[client.sent[0].id]).startswith("⏳ Starting")
 
 
 async def test_only_the_owner_can_cancel_a_job(bot: Bot, client: FakeClient) -> None:
@@ -205,7 +209,7 @@ async def test_queued_files_count_against_the_limit(
 
     second = Event(client, 42, data="video:2")
     await bot._on_button(second)
-    assert "today's limit of 1 files" in second.answers[0]
+    assert "today's limit of 1 file." in bare(second.answers[0])
 
 
 # ---------------------------------------------------------------- joining
@@ -284,24 +288,27 @@ async def test_everyone_who_writes_is_remembered(
 # ---------------------------------------------------------------- keyboard
 
 
-async def test_start_shows_the_keyboard(bot: Bot, client: FakeClient) -> None:
+def keyboard_labels(message: Sent) -> list[str]:
+    return [b.button.text for row in message.buttons for b in row]
+
+
+async def test_start_shows_the_keyboard(bot: Bot, client: FakeClient, store: Store) -> None:
+    store.set_language(42, "en")
     with pytest.raises(events.StopPropagation):
         await bot._on_start(Event(client, 42, text("/start")))
-    assert [b.button.text for row in client.sent[0].buttons for b in row] == [
-        "❓ Help",
-        "📊 My usage",
-    ]
+    assert keyboard_labels(client.sent[0]) == ["❓ Help", "📊 My usage", "🌐 Language"]
 
 
-async def test_admins_also_get_the_panel_button(bot: Bot, client: FakeClient) -> None:
+async def test_admins_also_get_the_panel_button(bot: Bot, client: FakeClient, store: Store) -> None:
+    store.set_language(7, "en")
     with pytest.raises(events.StopPropagation):
         await bot._on_start(Event(client, 7, text("/start")))
-    assert "🛠 Admin panel" in [b.button.text for row in client.sent[0].buttons for b in row]
+    assert "🛠 Admin panel" in keyboard_labels(client.sent[0])
 
 
 async def test_keyboard_buttons(bot: Bot, client: FakeClient) -> None:
     await bot._on_message(Event(client, 42, text("📊 My usage")))
-    assert client.sent[-1].text.startswith("Today: 0 of 20 files")
+    assert bare(client.sent[-1].text).startswith("Today: 0 of 20 files")
 
     await bot._on_message(Event(client, 42, text("❓ Help")))
     assert "How it works" in client.sent[-1].text
@@ -487,3 +494,103 @@ async def test_startup_logs_a_channel_it_cannot_reach(
     await Bot(Fresh(), config, store).check_channels()
     assert "cache channel -1004466589107" in caplog.text
     assert "post any message in the channel" in caplog.text
+
+
+# ---------------------------------------------------------------- languages
+
+
+def inline_labels(message: Sent) -> list[str]:
+    return [button.text for row in message.buttons for button in row]
+
+
+async def test_the_first_start_asks_for_a_language(bot: Bot, client: FakeClient) -> None:
+    with pytest.raises(events.StopPropagation):
+        await bot._on_start(Event(client, 42, text("/start")))
+    [picker] = client.sent
+    assert inline_labels(picker) == ["English", "فارسی"]
+    # Asked in every language, each line in its own direction.
+    assert picker.text.splitlines() == [
+        "\u200e🌐 Choose your language",
+        "\u200f🌐 زبان خود را انتخاب کنید",
+    ]
+
+
+async def test_choosing_persian(bot: Bot, client: FakeClient, store: Store) -> None:
+    choice = Event(client, 42, data="lang:fa")
+    await bot._on_button(choice)
+
+    assert store.language(42) == "fa"
+    assert bare(choice.edited[0]) == "✅ از این به بعد ربات با شما فارسی صحبت می‌کند."
+    welcome = client.sent[-1]
+    assert "ویدیوی خود را به صورت فایل بفرستید" in welcome.text
+    assert keyboard_labels(welcome) == ["❓ راهنما", "📊 میزان استفاده", "🌐 زبان"]
+
+    with pytest.raises(events.StopPropagation):
+        await bot._on_start(Event(client, 42, text("/start")))
+    assert "ویدیوی خود را" in client.sent[-1].text
+
+
+async def test_the_language_button_marks_the_current_one(
+    bot: Bot, client: FakeClient, store: Store
+) -> None:
+    store.set_language(42, "fa")
+    await bot._on_message(Event(client, 42, text("🌐 زبان")))
+    styles = {b.text: b.style for row in client.sent[-1].buttons for b in row}
+    assert styles["فارسی"].bg_success
+    assert styles["English"].bg_primary
+
+
+async def test_an_unknown_language_is_ignored(bot: Bot, client: FakeClient, store: Store) -> None:
+    await bot._on_button(Event(client, 42, data="lang:xx"))
+    assert store.language(42) is None
+    assert client.sent == []
+
+
+async def test_an_old_keyboard_still_works_after_switching(
+    bot: Bot, client: FakeClient, store: Store
+) -> None:
+    store.set_language(42, "fa")
+    await bot._on_message(Event(client, 42, text("❓ Help")))
+    reply = client.sent[-1]
+    assert "روش کار" in reply.text
+    # The answer brings the keyboard in the new language.
+    assert keyboard_labels(reply)[0] == "❓ راهنما"
+
+
+async def test_a_persian_menu_reads_right_to_left(
+    bot: Bot, client: FakeClient, store: Store
+) -> None:
+    store.set_language(42, "fa")
+    await bot._on_message(Event(client, 42, document("holiday (2).mkv", size=1536 * 1024)))
+    [menu] = client.sent
+    lines = [line for line in menu.text.splitlines() if line]
+    assert all(line.startswith("\u200f") for line in lines)
+    # The English file name is isolated, so it can't reorder the sentence.
+    assert "\u2068holiday (2).mkv\u2069" in lines[0]
+    assert "۱٫۵ مگابایت" in lines[0]
+    assert "▶️ قابل پخش کن" in inline_labels(menu)
+
+
+async def test_alerts_are_translated(bot: Bot, client: FakeClient, store: Store) -> None:
+    store.set_language(42, "fa")
+    expired = Event(client, 42, data="video:99")
+    await bot._on_button(expired)
+    assert expired.answers == [FA.alert("menu.expired_alert")]
+
+
+class Recorder:
+    """A client that only records the requests it is asked to send."""
+
+    def __init__(self) -> None:
+        self.requests: list[Any] = []
+
+    async def __call__(self, request: Any) -> None:
+        self.requests.append(request)
+
+
+async def test_commands_are_published_in_every_language(bot: Bot) -> None:
+    recorder = Recorder()
+    bot._client = recorder
+    await bot.publish_commands()
+    published = {r.lang_code: r.commands[0].description for r in recorder.requests}
+    assert published == {"": "Show the menu", "en": "Show the menu", "fa": "نمایش منو"}

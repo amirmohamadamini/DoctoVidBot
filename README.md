@@ -21,13 +21,25 @@ When several people send files at once, the extra files wait in a queue and
 each person sees their place in it, with a button to cancel.
 
 Everything is done with buttons. `/start` puts a keyboard under the message
-box with **❓ Help** and **📊 My usage**, plus **🛠 Admin panel** for admins.
+box with **❓ Help**, **📊 My usage** and **🌐 Language**, plus
+**🛠 Admin panel** for admins.
 Buttons are coloured by what they do: the main action is blue, confirming is
 green, and cancelling is red. Telegram apps too old for colours show them as
 ordinary buttons.
 
 Each person has a daily and a monthly limit, on both the number of files and
 their total size. The **📊 My usage** button shows how much they've used.
+
+### Languages
+
+The bot speaks English and Persian. The first `/start` asks which, and
+**🌐 Language** changes it later. Everything follows the choice: menus,
+buttons, progress, errors, the admin panel, and each admin's backup message.
+Persian is shown right to left, with Persian digits. File names in either
+script stay readable inside a sentence in the other.
+
+People who haven't chosen yet get `DEFAULT_LANGUAGE`. Telegram's command menu
+also follows each person's app language.
 
 ## How "make playable" works
 
@@ -90,6 +102,7 @@ All settings are in `.env`. [`.env.example`](.env.example) explains each one.
 | `ADMIN_DAILY_FILES`, `ADMIN_MONTHLY_FILES` | 100, 2000 | The same, for admins |
 | `ADMIN_DAILY_GB`, `ADMIN_MONTHLY_GB` | 50, 500 | |
 | `TIMEZONE` | UTC | When days and months start, for the limits |
+| `DEFAULT_LANGUAGE` | en | For people who haven't chosen a language: `en` or `fa` |
 | `JOIN_CHANNEL`, `JOIN_CHANNEL_LINK` | — | See [Required channel](#required-channel) |
 | `BACKUP_INTERVAL_HOURS` | 12 | See [Backups](#backups) |
 
@@ -103,15 +116,18 @@ problem found.
 
 ### Cache channel
 
-When the cache is on, every video the bot makes playable is also copied to a
-private channel. The next time anyone sends the same Telegram file, the bot
-sends that copy straight back instead of downloading and repacking it again.
+When the cache is on, every video the bot sends back is also copied to a
+private channel. The next time anyone sends the same Telegram file and asks
+for the same thing, the bot sends that copy straight back instead of
+downloading, repacking and uploading it again.
 
-Only **▶️ Make playable** results are cached, and only when they weren't
-renamed or given a thumbnail. Files sent back with **📄 Send as file** never
-are: they're most often someone's own documents, and sending them again costs
-the bot almost nothing anyway. Anyone who can see the channel can see what's in
-it, so keep it private and its admins few.
+Videos are cached both ways: made playable with **▶️ Make playable**, and
+turned into a file with **📄 Send as file**. Each is kept separately, so a
+video asked for as a file never comes back as a playable one, or the other way
+round. A video that was renamed or given a thumbnail isn't cached. Other files,
+like PDFs and archives, never are: they're most often someone's own documents.
+Anyone who can see the channel can see what's in it, so keep it private and its
+admins few.
 
 1. Create a private channel and add the bot as an admin that can post
    messages.
@@ -325,10 +341,30 @@ The code is small, and each module has one job:
 | `broadcast.py` | Sending a message to every user |
 | `backup.py` | Zipped database backups for the admins |
 | `menus.py` | What the bot says, and its buttons |
+| `i18n.py`, `locales/` | Languages, and mixing right-to-left with left-to-right |
 | `names.py` | Cleaning file names from users |
 | `progress.py` | Progress bars, and throttling edits |
 | `store.py` | SQLite: admin settings, users, usage, the cache index |
 | `config.py` | Settings from the environment |
+
+### Adding a language
+
+Every word the bot says is in `src/doctovid/locales/`, one TOML file per
+language, named by its code. To add one, say Russian:
+
+1. Copy `en.toml` to `ru.toml` and translate the text. Keep every
+   `{placeholder}` and every `<b>` and `<i>` tag. Set `name` (in the language
+   itself), `direction` (`ltr`, or `rtl` for Arabic, Hebrew and the like),
+   `digits` and `decimal`.
+2. Messages with a number in them, like `{count} files`, have one form per
+   plural category. `PLURALS` in `i18n.py` lists the categories each language
+   needs. Russian, Ukrainian and Arabic are there already; for another
+   language, add its [CLDR plural rule](https://www.unicode.org/cldr/charts/latest/supplemental/language_plural_rules.html).
+3. Run `uv run pytest tests/test_i18n.py`. It lists every missing or extra
+   message, wrong placeholder and wrong tag, and checks that button pop-ups
+   fit Telegram's 200 characters.
+
+The new language appears in the language picker on the next start.
 
 ## License
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Persian.** The bot now speaks English and Persian. The first `/start` asks
+  which, and a 🌐 Language button changes it. Persian is shown right to left,
+  with Persian digits, and file names in either script stay readable inside a
+  sentence in the other. `DEFAULT_LANGUAGE` sets the language for people who
+  haven't chosen. Adding another language is adding one file.
+- **Videos sent back as files are cached too**, when the cache is on. A video
+  turned into a document comes back from the cache channel next time, like a
+  video made playable already did. The two are kept apart.
+
+### Fixed
+
+- "1 files" and "1 people": counts now agree with their nouns.
+
 ## 2.0.0
 
 A rewrite.

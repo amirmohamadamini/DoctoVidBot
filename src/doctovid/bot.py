@@ -19,11 +19,12 @@ from telethon.tl.custom import Button
 from telethon.tl.functions.bots import SetBotCommandsRequest
 from telethon.tl.types import BotCommand, BotCommandScopeDefault
 
-from . import menus, progress, quota
+from . import i18n, menus, quota
 from .admin import Admin
 from .backup import Backups
 from .broadcast import Broadcaster
 from .config import Config
+from .i18n import Html, Locale, Locales, plain
 from .jobs import Job, JobQueue, Mode, QueueFull, Request, UserLimit
 from .membership import MEMBERS_FIX, POSTING_FIX, Membership, channel_problem
 from .names import apply_rename, looks_like_video, safe_name
@@ -53,7 +54,7 @@ THUMBNAIL_ATTEMPTS_PER_HOUR = 10
 
 #: The only command. Everything else is a button; /start is what Telegram
 #: sends when someone first opens the bot, and it brings the keyboard back.
-COMMANDS = {"start": "Show the menu"}
+COMMANDS = ("start",)
 
 
 @dataclass(slots=True)
@@ -75,17 +76,26 @@ class Bot:
         now: Callable[[], float] = time.monotonic,
         calendar: quota.Calendar | None = None,
         tools: MediaTools | None = None,
+        locales: Locales | None = None,
     ) -> None:
         self._client = client
         self._config = config
         self._store = store
+        self._locales = locales or i18n.load(config.default_language)
+        self._keyboard_actions = menus.keyboard_actions(self._locales)
         self._now = now
         self._calendar = calendar or quota.Calendar(config.timezone)
         self._telegram = TelethonTransport(client)
         self._tools = tools or LocalTools()
         self._queue = JobQueue(
             Runner(
-                config, store, self._telegram, now=now, calendar=self._calendar, tools=self._tools
+                config,
+                store,
+                self._telegram,
+                now=now,
+                calendar=self._calendar,
+                tools=self._tools,
+                locale_for=self.locale_for,
             ),
             workers=config.workers,
             max_waiting=config.max_queue,
@@ -111,6 +121,7 @@ class Bot:
             interval_hours=config.backup_interval_hours,
             directory=config.backup_dir,
             calendar_now=self._calendar.now,
+            locale_for=self.locale_for,
         )
         self._admin = Admin(
             client,
@@ -120,6 +131,8 @@ class Bot:
             backups=self._backups,
             membership=self._membership,
             activity=self.activity,
+            locale_for=self.locale_for,
+            is_keyboard_label=self._keyboard_actions.__contains__,
         )
 
     # ------------------------------------------------------------ lifecycle
@@ -141,7 +154,9 @@ class Bot:
         )
         self._client.add_event_handler(
             self._on_button,
-            events.CallbackQuery(pattern=rb"^(video|file|name|thumb|nothumb|drop|stop|joined):"),
+            events.CallbackQuery(
+                pattern=rb"^(video|file|name|thumb|nothumb|drop|stop|joined|lang):"
+            ),
         )
         self._queue.start()
         self._background = [
@@ -150,16 +165,22 @@ class Bot:
         ]
 
     async def publish_commands(self) -> None:
-        try:
-            await self._client(
-                SetBotCommandsRequest(
-                    scope=BotCommandScopeDefault(),
-                    lang_code="",
-                    commands=[BotCommand(name, about) for name, about in COMMANDS.items()],
+        """The command menu, in the language of each person's Telegram app, and
+        in the default language for everyone else."""
+        lists = [("", self._locales.default)] + [(t.code, t) for t in self._locales]
+        for lang_code, t in lists:
+            try:
+                await self._client(
+                    SetBotCommandsRequest(
+                        scope=BotCommandScopeDefault(),
+                        lang_code=lang_code,
+                        commands=[
+                            BotCommand(name, t.label(f"command.{name}")) for name in COMMANDS
+                        ],
+                    )
                 )
-            )
-        except Exception:
-            log.warning("could not publish the command list", exc_info=True)
+            except Exception:
+                log.warning("could not publish the %r command list", lang_code, exc_info=True)
 
     async def check_channels(self) -> None:
         """Say at startup, in the log, if a configured channel can't be reached.
@@ -167,6 +188,7 @@ class Bot:
         The admin panel checks again when a switch is turned on; this is for the
         admin reading the log after a deploy, before anyone taps anything.
         """
+        english = self._locales.get(i18n.REFERENCE)
         channels = [
             ("cache", self._config.cache_channel_id, POSTING_FIX),
             ("required", self._config.join_channel, MEMBERS_FIX),
@@ -177,7 +199,8 @@ class Bot:
             try:
                 await self._client.get_input_entity(channel)
             except Exception as exc:
-                log.warning("%s channel %s: %s", label, channel, channel_problem(exc, fix=fix))
+                problem = plain(channel_problem(exc, fix=fix, t=english))
+                log.warning("%s channel %s: %s", label, channel, problem)
 
     async def stop(self) -> None:
         # Everything that might still touch the database is stopped and waited
@@ -188,12 +211,23 @@ class Bot:
         await self._admin.stop()
         await self._queue.stop()
 
-    def activity(self) -> str:
-        return (
-            f"Running: {self._queue.running} of {self._config.workers}\n"
-            f"Waiting: {self._queue.waiting} (at most {self._config.max_queue})\n"
-            f"Open menus: {len(self._requests)}"
+    def activity(self, t: Locale) -> Html:
+        return Html(
+            "\n".join(
+                [
+                    t.phrase(
+                        "admin.running", count=self._queue.running, workers=self._config.workers
+                    ),
+                    t.phrase(
+                        "admin.waiting", count=self._queue.waiting, limit=self._config.max_queue
+                    ),
+                    t.phrase("admin.menus", count=len(self._requests)),
+                ]
+            )
         )
+
+    def locale_for(self, user_id: int) -> Locale:
+        return self._locales.get(self._store.language(user_id))
 
     # ------------------------------------------------------------ commands
 
@@ -201,27 +235,61 @@ class Bot:
         self._store.seen(event.sender_id)
 
     async def _on_start(self, event: Any) -> None:
+        # The first time, the language comes first: everything after it is
+        # in the language chosen.
+        if self._store.language(event.sender_id) is None:
+            await self._ask_language(event)
+        else:
+            await self._welcome(event)
+        raise events.StopPropagation
+
+    async def _welcome(self, event: Any) -> None:
+        t = self.locale_for(event.sender_id)
         await event.respond(
-            menus.welcome(self._config.max_file_mb, self._admin.cache_on()),
+            menus.welcome(t, self._config.max_file_mb, self._admin.cache_on()),
             buttons=self._keyboard(event.sender_id),
             link_preview=False,
         )
-        raise events.StopPropagation
+
+    async def _ask_language(self, event: Any) -> None:
+        chosen = self._store.language(event.sender_id)
+        current = self._locales.get(chosen) if chosen else None
+        text, keyboard = menus.language_picker(self._locales, current)
+        await event.respond(text, buttons=to_buttons(keyboard))
+
+    async def _set_language(self, event: Any, code: str) -> None:
+        if code not in self._locales:
+            await event.answer()
+            return
+        self._store.set_language(event.sender_id, code)
+        t = self.locale_for(event.sender_id)
+        await event.answer()
+        await event.edit(t.text("language.chosen"))
+        # The keyboard is redrawn in the new language along with it.
+        await self._welcome(event)
 
     def _keyboard(self, user_id: int) -> list[list[Any]]:
-        return to_keyboard(menus.main_keyboard(self._admin.is_admin(user_id)))
+        t = self.locale_for(user_id)
+        return to_keyboard(
+            menus.main_keyboard(t, self._admin.is_admin(user_id)),
+            t.label("keyboard.placeholder"),
+        )
 
-    async def _on_keyboard(self, event: Any, label: str) -> None:
+    async def _on_keyboard(self, event: Any, action: str) -> None:
         user_id = event.sender_id
-        if label == menus.HELP_BUTTON:
-            text = menus.HELP
-            if self._admin.is_admin(user_id):
-                text += f"\n\nYou're an admin: tap {menus.ADMIN_BUTTON} for the admin panel."
-            await event.respond(text, link_preview=False)
-        elif label == menus.USAGE_BUTTON:
+        t = self.locale_for(user_id)
+        if action == "help":
+            text = menus.help_text(t, self._admin.is_admin(user_id))
+            # Sent with the keyboard: a tap on an old keyboard, drawn in another
+            # language, gets the current one back.
+            await event.respond(text, buttons=self._keyboard(user_id), link_preview=False)
+        elif action == "usage":
             today, this_month = self._store.usage(user_id, self._calendar.today())
-            await event.respond(quota.summary(self._config.limits_for(user_id), today, this_month))
-        elif label == menus.ADMIN_BUTTON and self._admin.is_admin(user_id):
+            limits = self._config.limits_for(user_id)
+            await event.respond(quota.summary(limits, today, this_month, t))
+        elif action == "language":
+            await self._ask_language(event)
+        elif action == "admin" and self._admin.is_admin(user_id):
             await self._admin.open_panel(event)
         else:
             await self._nudge(event)
@@ -229,12 +297,13 @@ class Bot:
     async def _nudge(self, event: Any) -> None:
         """Anything the bot doesn't understand. The keyboard goes with it, so
         someone who never sent /start still ends up with the buttons."""
+        t = self.locale_for(event.sender_id)
         await event.respond(
-            f"👋 Send me a file, or tap {menus.HELP_BUTTON}.",
+            t.text("start.nudge", help=t.word("keyboard.help")),
             buttons=self._keyboard(event.sender_id),
         )
 
-    def _over_limit(self, user_id: int, size: int) -> str | None:
+    def _over_limit(self, user_id: int, size: int) -> Html | None:
         """Files still queued or running count too, or a queue could hold far
         more than anyone is allowed."""
         today, this_month = self._store.usage(user_id, self._calendar.today())
@@ -246,14 +315,15 @@ class Bot:
             this_month=this_month.plus(files, volume),
             size=size,
             calendar=self._calendar,
+            t=self.locale_for(user_id),
         )
 
     # ------------------------------------------------------------ messages
 
     async def _on_message(self, event: Any) -> None:
         message = event.message
-        if message.raw_text in menus.KEYBOARD_LABELS:
-            await self._on_keyboard(event, message.raw_text)
+        if action := self._keyboard_actions.get(message.raw_text):
+            await self._on_keyboard(event, action)
             return
         if message.raw_text.startswith("/"):
             await self._nudge(event)
@@ -268,10 +338,7 @@ class Bot:
         if not await self._may_use(event):
             return
         if message.photo:
-            await event.reply(
-                "📷 That's a photo, and Telegram strips photos of their name. "
-                "Send it as a file to rename it."
-            )
+            await event.reply(self.locale_for(event.sender_id).text("file.photo"))
             return
         if message.document and not (message.sticker or message.voice or message.video_note):
             await self._take_file(event)
@@ -289,25 +356,26 @@ class Bot:
         if await self._is_allowed(event.sender_id):
             return True
         assert self._config.join_link is not None
-        text, keyboard = menus.join_required(self._config.join_link)
+        text, keyboard = menus.join_required(
+            self._config.join_link, self.locale_for(event.sender_id)
+        )
         await event.reply(text, buttons=to_buttons(keyboard))
         return False
 
     async def _take_file(self, event: Any) -> None:
         message = event.message
         user_id = event.sender_id
+        t = self.locale_for(user_id)
         size = message.file.size or 0
         if size > self._config.max_file_bytes:
-            await event.reply(
-                f"📦 That file is {progress.size(size)}. The most I can take is "
-                f"{progress.size(self._config.max_file_bytes)}."
-            )
+            limit = t.size(self._config.max_file_bytes)
+            await event.reply(t.text("file.too_big", size=t.size(size), limit=limit))
             return
         if reason := self._over_limit(user_id, size):
-            await event.reply(f"🚫 {reason}")
+            await event.reply(t.text("file.over_limit", reason=reason))
             return
         if sum(1 for r in self._requests.values() if r.user_id == user_id) >= MAX_OPEN_MENUS:
-            await event.reply("✋ Finish or cancel one of your open files first.")
+            await event.reply(t.text("file.too_many_open"))
             return
 
         name = safe_name(message.file.name or _default_name(message))
@@ -322,7 +390,7 @@ class Bot:
             is_video=looks_like_video(name, message.file.mime_type) and not message.gif,
             expires_at=self._now() + self._config.menu_timeout_s,
         )
-        text, keyboard = menus.request_menu(request)
+        text, keyboard = menus.request_menu(request, t)
         menu = await event.reply(text, buttons=to_buttons(keyboard))
         request.menu_message_id = menu.id
         self._requests[request.id] = request
@@ -343,22 +411,21 @@ class Bot:
         await self._delete(event.sender_id, prompt.message_id)
         if request is None:
             return
+        t = self.locale_for(event.sender_id)
+        button = t.word("menu.add_thumbnail")
         size = event.message.file.size or 0
         if size > THUMBNAIL_MAX_BYTES:
+            limit = t.size(THUMBNAIL_MAX_BYTES)
             await event.reply(
-                f"⚠️ That picture is {progress.size(size)}. A thumbnail can be at most "
-                f"{progress.size(THUMBNAIL_MAX_BYTES)}. Tap 🖼 Thumbnail to try a smaller one."
+                t.text("thumbnail.too_big", size=t.size(size), limit=limit, button=button)
             )
             return
         if not self._may_try_thumbnail(event.sender_id):
-            await event.reply(
-                "⏳ That's a lot of thumbnails. Try again in a little while, or send the "
-                "file back without one."
-            )
+            await event.reply(t.text("thumbnail.too_many"))
             return
         fitted = await self._fit_thumbnail(event, request)
         if fitted is None:
-            await event.reply("⚠️ I couldn't use that picture. Tap 🖼 Thumbnail to try another.")
+            await event.reply(t.text("thumbnail.unusable", button=button))
             return
         if request.id not in self._requests:
             # Sent on its way, or cancelled, while the picture was downloading.
@@ -413,6 +480,9 @@ class Bot:
 
     async def _on_button(self, event: Any) -> None:
         action, _, raw_id = event.data.decode(errors="replace").partition(":")
+        if action == "lang":
+            await self._set_language(event, raw_id)
+            return
         try:
             target = int(raw_id)
         except ValueError:
@@ -425,61 +495,54 @@ class Bot:
             await self._check_joined(event)
             return
 
+        t = self.locale_for(event.sender_id)
         request = self._requests.get(target)
         if request is None or request.user_id != event.sender_id:
-            await event.answer("This menu has expired. Send the file again.", alert=True)
+            await event.answer(t.alert("menu.expired_alert"), alert=True)
             return
 
         match action:
             case "video" | "file":
                 await self._submit(event, request, Mode(action))
             case "name":
-                await self._ask(
-                    event,
-                    request,
-                    "name",
-                    menus.rename_prompt(request.output_name),
-                    hint=request.output_name,
-                )
+                prompt = t.text("menu.rename_prompt", name=request.output_name)
+                await self._ask(event, request, "name", prompt, hint=request.output_name)
             case "thumb":
-                await self._ask(
-                    event, request, "thumb", menus.THUMBNAIL_PROMPT, hint="Send a photo"
-                )
+                prompt = t.text("menu.thumbnail_prompt")
+                hint = t.label("menu.thumbnail_hint")
+                await self._ask(event, request, "thumb", prompt, hint=hint)
             case "nothumb":
                 _discard(request.thumbnail)
                 request.thumbnail = None
-                await event.answer("Thumbnail removed.")
+                await event.answer(t.alert("menu.thumbnail_removed"))
                 await self._show_menu(request)
             case "drop":
                 self._close(request)
                 await event.answer()
-                await self._edit(request.user_id, request.menu_message_id, "✖️ Cancelled.")
+                await self._edit(request.user_id, request.menu_message_id, t.text("menu.cancelled"))
             case _:
                 await event.answer()
 
     async def _submit(self, event: Any, request: Request, mode: Mode) -> None:
+        t = self.locale_for(request.user_id)
         # Checked again when it matters: the menu may have been opened before
         # the join rule was turned on, or before they left the channel.
         if not await self._is_allowed(request.user_id):
-            text, _ = menus.join_required(self._config.join_link or "")
-            await event.answer(text, alert=True)
+            await event.answer(t.alert("join.prompt"), alert=True)
             return
         # Also again: other files may have been sent since this menu opened.
         if reason := self._over_limit(request.user_id, request.size):
-            await event.answer(reason, alert=True)
+            await event.answer(plain(t.lines(reason)), alert=True)
             return
         job = Job(id=self._queue.next_id(), request=request, mode=mode)
         try:
             position = await self._queue.submit(job)
         except UserLimit:
-            await event.answer(
-                f"You already have {self._config.jobs_per_user} files on the way. "
-                "Wait for one to finish.",
-                alert=True,
-            )
+            limit = self._config.jobs_per_user
+            await event.answer(t.alert("queue.per_user", count=limit), alert=True)
             return
         except QueueFull:
-            await event.answer("I'm very busy right now. Try again in a few minutes.", alert=True)
+            await event.answer(t.alert("queue.full"), alert=True)
             return
         # The request now belongs to the job, which cleans up its thumbnail.
         self._requests.pop(request.id, None)
@@ -490,27 +553,27 @@ class Bot:
         await event.answer()
 
     async def _check_joined(self, event: Any) -> None:
+        t = self.locale_for(event.sender_id)
         if self._membership is None or await self._membership.is_member(event.sender_id):
-            await event.answer("Thanks for joining!")
-            await event.edit("✅ Thanks for joining. Now send me your file.")
+            await event.answer(t.alert("join.thanks_alert"))
+            await event.edit(t.text("join.thanks"))
         else:
-            await event.answer(
-                "I can't see you in the channel yet. Join it, then tap again.", alert=True
-            )
+            await event.answer(t.alert("join.not_yet"), alert=True)
 
     async def _stop_job(self, event: Any, job_id: int) -> None:
+        t = self.locale_for(event.sender_id)
         job = self._queue.find(job_id)
         if job is None or job.user_id != event.sender_id:
-            await event.answer("That's already finished.")
+            await event.answer(t.alert("queue.finished"))
             return
         self._queue.cancel(job_id)
-        await event.answer("Cancelled.")
+        await event.answer(t.alert("queue.stopped"))
         # A running job says so itself, but one cancelled before it got going
         # never runs the code that would.
         _discard(job.request.thumbnail)
-        await self._edit(job.user_id, job.status_message_id, "✖️ Cancelled.")
+        await self._edit(job.user_id, job.status_message_id, t.text("menu.cancelled"))
 
-    async def _ask(self, event: Any, request: Request, kind: str, text: str, *, hint: str) -> None:
+    async def _ask(self, event: Any, request: Request, kind: str, text: Html, *, hint: str) -> None:
         old = self._prompts.pop(request.user_id, None)
         if old is not None:
             await self._delete(request.user_id, old.message_id)
@@ -526,23 +589,24 @@ class Bot:
         self._prompts[request.user_id] = Prompt(request.id, kind, sent.id)
 
     async def _show_position(self, job: Job, position: int) -> None:
+        t = self.locale_for(job.user_id)
         await self._edit(
             job.user_id,
             job.status_message_id,
-            menus.queued(job.request.output_name, position),
-            cancel_button(job.id),
+            menus.queued(job.request.output_name, position, t),
+            cancel_button(job.id, t),
         )
 
     # ------------------------------------------------------------ menus
 
     async def _show_menu(self, request: Request) -> None:
-        text, keyboard = menus.request_menu(request)
+        text, keyboard = menus.request_menu(request, self.locale_for(request.user_id))
         await self._edit(request.user_id, request.menu_message_id, text, keyboard)
 
     async def _resend_menu(self, request: Request) -> None:
         """A fresh menu at the bottom of the chat, where the user is looking."""
         await self._delete(request.user_id, request.menu_message_id)
-        text, keyboard = menus.request_menu(request)
+        text, keyboard = menus.request_menu(request, self.locale_for(request.user_id))
         menu = await self._client.send_message(
             request.user_id, text, buttons=to_buttons(keyboard), reply_to=request.message_id
         )
@@ -571,7 +635,7 @@ class Bot:
             await self._edit(
                 request.user_id,
                 request.menu_message_id,
-                "⌛ This menu expired. Send the file again if you still need it.",
+                self.locale_for(request.user_id).text("menu.expired"),
             )
 
     # ------------------------------------------------------------ helpers

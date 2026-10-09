@@ -101,3 +101,10 @@ def test_existing_files_are_made_private(tmp_path: Path) -> None:
     finally:
         os.umask(old_umask)
     assert stat.S_IMODE(config.session_path.stat().st_mode) == 0o600
+
+
+def test_the_default_language_is_checked() -> None:
+    assert load(REQUIRED).default_language == "en"
+    assert load({**REQUIRED, "DEFAULT_LANGUAGE": "FA"}).default_language == "fa"
+    with pytest.raises(ConfigError, match="DEFAULT_LANGUAGE must be one of en, fa"):
+        load({**REQUIRED, "DEFAULT_LANGUAGE": "klingon"})

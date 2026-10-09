@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import progress
+from .i18n import Html, Locale
 
 GB = 1024**3
 
@@ -53,6 +53,10 @@ class Calendar:
         today = self.today()
         return date(today.year + today.month // 12, today.month % 12 + 1, 1)
 
+    def until_next_month(self) -> timedelta:
+        now = self.now()
+        return datetime.combine(self.next_month(), datetime.min.time(), now.tzinfo) - now
+
 
 def refusal(
     limits: Limits,
@@ -61,55 +65,41 @@ def refusal(
     this_month: Usage,
     size: int,
     calendar: Calendar,
-) -> str | None:
+    t: Locale,
+) -> Html | None:
     """Why one more file of `size` bytes is refused, or None if it is allowed.
 
     `today` and `this_month` should include files still queued or running, or
     someone could queue far past a limit before any of it was counted.
     """
-    day_reset = f"It resets in {_span(calendar.until_tomorrow())}."
-    first = calendar.next_month()
-    month_reset = f"It resets on {first.day} {first:%B}."
+    day_wait, month_wait = calendar.until_tomorrow(), calendar.until_next_month()
     checks = [
-        (limits.files_per_day, today.files + 1, "today's limit", "files", day_reset),
-        (limits.files_per_month, this_month.files + 1, "this month's limit", "files", month_reset),
-        (limits.gb_per_day * GB, today.bytes + size, "today's limit", "bytes", day_reset),
-        (
-            limits.gb_per_month * GB,
-            this_month.bytes + size,
-            "this month's limit",
-            "bytes",
-            month_reset,
-        ),
+        (limits.files_per_day, today.files + 1, "limit.day_files", day_wait),
+        (limits.files_per_month, this_month.files + 1, "limit.month_files", month_wait),
+        (limits.gb_per_day * GB, today.bytes + size, "limit.day_volume", day_wait),
+        (limits.gb_per_month * GB, this_month.bytes + size, "limit.month_volume", month_wait),
     ]
-    for limit, would_be, period, unit, reset in checks:
+    for limit, would_be, key, wait in checks:
         if limit and would_be > limit:
-            if unit == "files":
-                return f"You've reached {period} of {limit} files. {reset}"
-            used = would_be - size
-            return (
-                f"That file would take you past {period} of {progress.size(limit)} "
-                f"(you've used {progress.size(used)}). {reset}"
-            )
+            span = t.span(wait.total_seconds())
+            if key.endswith("_files"):
+                return t.phrase(key, count=limit, wait=span)
+            return t.phrase(key, limit=t.size(limit), used=t.size(would_be - size), wait=span)
     return None
 
 
-def summary(limits: Limits, today: Usage, this_month: Usage) -> str:
-    def line(label: str, usage: Usage, files: int, gb: int) -> str:
-        count = f"{usage.files} of {files} files" if files else f"{usage.files} files"
-        size = progress.size(usage.bytes)
-        volume = f"{size} of {progress.size(gb * GB)}" if gb else size
-        return f"{label}: {count}, {volume}"
+def summary(limits: Limits, today: Usage, this_month: Usage, t: Locale) -> Html:
+    def line(period: str, usage: Usage, files: int, gb: int) -> Html:
+        count = (
+            t.phrase("usage.files_of", used=usage.files, count=files)
+            if files
+            else t.phrase("usage.files", count=usage.files)
+        )
+        size = t.size(usage.bytes)
+        volume = t.phrase("usage.volume_of", used=size, limit=t.size(gb * GB)) if gb else size
+        return t.phrase("usage.line", period=t.word(period), files=count, volume=volume)
 
-    return "\n".join(
-        [
-            line("Today", today, limits.files_per_day, limits.gb_per_day),
-            line("This month", this_month, limits.files_per_month, limits.gb_per_month),
-        ]
+    return t.lines(
+        line("usage.today", today, limits.files_per_day, limits.gb_per_day),
+        line("usage.month", this_month, limits.files_per_month, limits.gb_per_month),
     )
-
-
-def _span(delta: timedelta) -> str:
-    minutes = max(1, int(delta.total_seconds() // 60))
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours} h {minutes} min" if hours else f"{minutes} min"

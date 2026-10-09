@@ -9,13 +9,13 @@ import secrets
 import shutil
 import time
 from collections.abc import Callable
-from html import escape
 from pathlib import Path
 
 from telethon.errors import FloodWaitError, RPCError
 
-from . import media, progress
+from . import i18n, media, progress
 from .config import Config
+from .i18n import Html, Locale
 from .jobs import Job, Mode
 from .names import extension, with_extension
 from .quota import Calendar
@@ -51,11 +51,17 @@ def job_directory(root: Path, job_id: int) -> Path:
 
 
 class JobFailed(Exception):
-    """A failure with a message fit to show the person who sent the file."""
+    """A failure with a message fit to show the person who sent the file: the
+    key of the message, and what goes in it."""
+
+    def __init__(self, key: str, **values: object) -> None:
+        super().__init__(key)
+        self.key = key
+        self.values = values
 
 
-def cancel_button(job_id: int) -> Keyboard:
-    return [[Key("✖️ Cancel", f"stop:{job_id}", DANGER)]]
+def cancel_button(job_id: int, t: Locale) -> Keyboard:
+    return [[Key(t.label("menu.cancel"), f"stop:{job_id}", DANGER)]]
 
 
 def space_needed(job: Job) -> int:
@@ -68,13 +74,16 @@ def free_disk(path: Path) -> int:
 
 
 def cache_key(job: Job) -> str | None:
-    """Only a video made playable, and only as it came out.
+    """Only videos, and only as they came out: made playable, or sent back as
+    a file. The two are cached apart, so each comes back the way it was asked
+    for.
 
-    That is where the cache saves real work. "Send as file" is left out: it is
-    most often someone's own document, and re-sending one costs nothing. A
-    custom name or thumbnail means a different file, so it's left out too.
+    That is where the cache saves real work: a remux, or a large download and
+    upload. Other files sent back are left out: they are most often someone's
+    own documents, and small. A custom name or thumbnail means a different
+    file, so it's left out too.
     """
-    if job.mode is not Mode.VIDEO or job.request.customised:
+    if not job.request.is_video or job.request.customised:
         return None
     return f"{job.request.document_id}:{job.mode}"
 
@@ -90,8 +99,11 @@ class Runner:
         free_bytes: Callable[[Path], int] = free_disk,
         calendar: Calendar | None = None,
         tools: MediaTools | None = None,
+        locale_for: Callable[[int], Locale] | None = None,
     ) -> None:
         self._config = config
+        english = i18n.load().default
+        self._locale_for = locale_for or (lambda _user_id: english)
         self._tools = tools or LocalTools()
         self._calendar = calendar or Calendar(config.timezone)
         self._store = store
@@ -110,27 +122,23 @@ class Runner:
         try:
             await self._run(job, workdir)
         except asyncio.CancelledError:
-            await self._status(job, "✖️ Cancelled.")
+            await self._status(job, self._t(job).text("menu.cancelled"))
             raise
         except JobFailed as exc:
-            await self._status(job, f"⚠️ {exc}")
+            t = self._t(job)
+            await self._status(job, t.text("job.failed", reason=t.phrase(exc.key, **exc.values)))
         except WorkerUnavailable:
             log.exception("job %s: the media worker failed", job.id)
-            await self._status(
-                job, "⚠️ The video converter isn't available right now. Please try again later."
-            )
+            await self._status(job, self._t(job).text("job.converter_down"))
         except FloodWaitError as exc:
-            await self._status(
-                job,
-                f"⚠️ Telegram is limiting this bot right now. Try again in "
-                f"{progress.clock(exc.seconds)}.",
-            )
+            t = self._t(job)
+            await self._status(job, t.text("job.flood", wait=t.span(exc.seconds)))
         except RPCError as exc:
             log.warning("job %s: telegram refused: %s", job.id, exc)
-            await self._status(job, "⚠️ Telegram refused that request. Please try again later.")
+            await self._status(job, self._t(job).text("job.refused"))
         except Exception:
             log.exception("job %s failed", job.id)
-            await self._status(job, "⚠️ Something went wrong on our side. Please try again later.")
+            await self._status(job, self._t(job).text("job.crashed"))
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
             if job.request.thumbnail:
@@ -144,7 +152,7 @@ class Runner:
 
         needed = space_needed(job)
         if self._free_bytes(workdir) - self._reserved - needed < DISK_MARGIN_BYTES:
-            raise JobFailed("The server is short of disk space right now. Try again later.")
+            raise JobFailed("job.disk")
         self._reserved += needed
         try:
             message_id = await self._process(job, workdir)
@@ -172,33 +180,29 @@ class Runner:
         )
 
     async def _download(self, job: Job, dest: str) -> None:
-        await self._status(
-            job, f"⬇️ Downloading <b>{escape(job.request.file_name)}</b>…", cancellable=True
-        )
-        report = self._transfer_bar(job, "⬇️ Downloading", job.request.file_name)
+        name = job.request.file_name
+        await self._status(job, self._t(job).text("job.downloading", name=name), cancellable=True)
+        report = self._transfer_bar(job, "progress.downloading", name)
         found = await self._telegram.download(job.user_id, job.request.message_id, dest, report)
         if not found:
-            raise JobFailed("That file is no longer in this chat. Send it again.")
+            raise JobFailed("job.gone")
 
     async def _send_video(self, job: Job, source: Path, workdir: Path) -> int:
         self._tools.share_file(source)
         info = await self._tools.probe(source)
         if info is None or not info.is_video:
-            raise JobFailed("That doesn't look like a video, so it can't be made playable.")
+            raise JobFailed("job.not_video")
 
         name = job.request.output_name
         match info.plan:
             case media.Plan.UNSUPPORTED:
-                raise JobFailed(
-                    f"This video uses {escape(info.video_codec or 'an unknown codec')}, which "
-                    "Telegram can't play. Making it playable would mean re-encoding it, "
-                    "which this bot doesn't do."
-                )
+                codec = info.video_codec or self._t(job).phrase("job.unknown_codec")
+                raise JobFailed("job.unsupported", codec=codec)
             case media.Plan.REMUX:
                 target = workdir / PLAYABLE_FILE
                 report = self._remux_bar(job, name)
                 if not await self._tools.remux(source, target, info, report):
-                    raise JobFailed("Repacking that video failed. It may be damaged.")
+                    raise JobFailed("job.repack_failed")
                 source = target
                 name = with_extension(name, ".mp4")
             case media.Plan.READY:
@@ -240,17 +244,17 @@ class Runner:
             file = claim(path)
         except UnsafeFile as exc:
             log.error("job %s: refusing to upload %s: %s", job.id, path, exc)
-            raise JobFailed("Something went wrong preparing that file.") from exc
+            raise JobFailed("job.prepare_failed") from exc
         with file:
             size = os.fstat(file.fileno()).st_size
             # Converting its audio can make a video bigger than it was, and
             # past Telegram's limit the upload would only fail later.
             if size > self._config.max_file_bytes:
+                t = self._t(job)
                 raise JobFailed(
-                    f"Made playable, that file would be {progress.size(size)}, over the "
-                    f"{progress.size(self._config.max_file_bytes)} Telegram allows."
+                    "job.too_big", size=t.size(size), limit=t.size(self._config.max_file_bytes)
                 )
-            await self._status(job, f"⬆️ Uploading <b>{escape(name)}</b>…", cancellable=True)
+            await self._status(job, self._t(job).text("job.uploading", name=name), cancellable=True)
             return await self._telegram.upload(
                 job.user_id,
                 file,
@@ -259,7 +263,7 @@ class Runner:
                 video=video,
                 thumbnail=thumbnail,
                 reply_to=job.request.message_id,
-                progress=self._transfer_bar(job, "⬆️ Uploading", name),
+                progress=self._transfer_bar(job, "progress.uploading", name),
             )
 
     async def _finish(self, job: Job) -> None:
@@ -315,14 +319,17 @@ class Runner:
 
     # ------------------------------------------------------------ progress
 
-    async def _status(self, job: Job, text: str, *, cancellable: bool = False) -> None:
-        buttons = cancel_button(job.id) if cancellable else None
+    def _t(self, job: Job) -> Locale:
+        return self._locale_for(job.user_id)
+
+    async def _status(self, job: Job, text: Html, *, cancellable: bool = False) -> None:
+        buttons = cancel_button(job.id, self._t(job)) if cancellable else None
         try:
             await self._telegram.edit(job.user_id, job.status_message_id, text, buttons)
         except Exception:
             log.debug("status edit failed", exc_info=True)
 
-    def _transfer_bar(self, job: Job, verb: str, name: str) -> progress.ProgressCallback:
+    def _transfer_bar(self, job: Job, title: str, name: str) -> progress.ProgressCallback:
         throttle = progress.Throttle(self._config.progress_interval_s, self._now)
         speed = progress.Speed(self._now)
 
@@ -330,7 +337,7 @@ class Runner:
             if not throttle.due():
                 return
             speed.update(done)
-            text = progress.transfer(verb, name, done, total, speed.value)
+            text = progress.transfer(title, name, done, total, speed=speed.value, t=self._t(job))
             if throttle.admit(text):
                 await self._edit_quietly(job, text)
 
@@ -340,17 +347,17 @@ class Runner:
         throttle = progress.Throttle(self._config.progress_interval_s, self._now)
 
         async def report(done_s: int, total_s: int) -> None:
-            text = progress.remux(name, done_s, total_s)
+            text = progress.remux(name, done_s, total_s, self._t(job))
             if throttle.admit(text):
                 await self._edit_quietly(job, text)
 
         return report
 
-    async def _edit_quietly(self, job: Job, text: str) -> None:
+    async def _edit_quietly(self, job: Job, text: Html) -> None:
         # A failed progress edit must never fail the transfer it describes.
         try:
             await self._telegram.edit(
-                job.user_id, job.status_message_id, text, cancel_button(job.id)
+                job.user_id, job.status_message_id, text, cancel_button(job.id, self._t(job))
             )
         except Exception:
             log.debug("progress edit failed", exc_info=True)

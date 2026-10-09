@@ -17,6 +17,7 @@ from telethon.errors import (
     UserIsBlockedError,
 )
 
+from .i18n import Html, Locale
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -48,14 +49,16 @@ class Tally:
     def done(self) -> int:
         return self.sent + self.unreachable + self.failed
 
-    def describe(self) -> str:
-        text = (
-            f"{self.done} of {self.total}: {self.sent} sent, "
-            f"{self.unreachable} unreachable, {self.failed} failed"
+    def describe(self, t: Locale) -> Html:
+        text = t.phrase(
+            "broadcast.tally",
+            done=self.done,
+            total=self.total,
+            sent=self.sent,
+            unreachable=self.unreachable,
+            failed=self.failed,
         )
-        if self.stopped:
-            text += ". Stopped early: Telegram asked the bot to wait too long"
-        return text
+        return t.phrase("broadcast.stopped", tally=text) if self.stopped else text
 
 
 Report = Callable[[Tally], Awaitable[None]]
