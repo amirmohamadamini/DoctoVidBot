@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from telethon import events
-from telethon.errors import UserNotParticipantError
+from telethon.errors import FloodWaitError, UserNotParticipantError
 from telethon.tl.types import ChannelParticipant
 
 from doctovid import media
@@ -251,6 +251,23 @@ async def test_non_members_are_asked_to_join(store: Store, tmp_path: Path) -> No
     [reply] = client.sent
     assert "join our channel" in reply.text
     assert reply.buttons[0][0].type.url == "https://t.me/newsroom"
+    assert bot._requests == {}
+
+
+class SlowClient(FakeClient):
+    """Telegram asking the bot to wait before it may check anyone."""
+
+    async def __call__(self, request: Any) -> Any:
+        raise FloodWaitError(request=None, capture=300)
+
+
+async def test_a_failed_check_lets_nobody_in(store: Store, tmp_path: Path) -> None:
+    client = SlowClient()
+    bot = joining_bot(client, store, tmp_path)
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+
+    [reply] = client.sent
+    assert "couldn't check" in reply.text
     assert bot._requests == {}
 
 
@@ -594,3 +611,44 @@ async def test_commands_are_published_in_every_language(bot: Bot) -> None:
     await bot.publish_commands()
     published = {r.lang_code: r.commands[0].description for r in recorder.requests}
     assert published == {"": "Show the menu", "en": "Show the menu", "fa": "نمایش منو"}
+
+
+# ---------------------------------------------------------------- edits
+
+
+def edited(document_id: int | None, message_id: int = 77) -> Any:
+    document = None if document_id is None else SimpleNamespace(id=document_id)
+    return SimpleNamespace(id=message_id, document=document)
+
+
+async def test_replacing_the_file_closes_its_menu(bot: Bot, client: FakeClient) -> None:
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    menu = client.sent[0]
+
+    await bot._on_edit(Event(client, 42, edited(document_id=1234)))
+    assert bot._requests == {}
+    assert "replaced the file" in client.edits[menu.id]
+
+    stale = Event(client, 42, data="video:1")
+    await bot._on_button(stale)
+    assert bot._queue.waiting == 0
+
+
+async def test_a_new_caption_keeps_the_menu(bot: Bot, client: FakeClient) -> None:
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    await bot._on_edit(Event(client, 42, edited(document_id=9000)))
+    await bot._on_edit(Event(client, 99, edited(document_id=1234)))
+    assert list(bot._requests) == [1]
+
+
+async def test_the_sweep_forgets_old_thumbnail_attempts(
+    client: FakeClient, config: Config, store: Store
+) -> None:
+    clock = [0.0]
+    bot = Bot(client, config, store, now=lambda: clock[0])
+    assert bot._may_try_thumbnail(42)
+    clock[0] = 1800
+    assert bot._may_try_thumbnail(43)
+    clock[0] = 3601
+    await bot.sweep()
+    assert list(bot._thumbnail_attempts) == [43]

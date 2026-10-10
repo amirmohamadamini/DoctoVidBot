@@ -172,15 +172,45 @@ async def test_broadcast_asks_for_the_message_then_confirms(
     with pytest.raises(events.StopPropagation):
         await admin._admins_only(admin._on_draft)(draft)
     assert [bare(text) for text in draft.said] == ["Send this message to 3 people?"]
-    assert draft.buttons[0][0].type.data == b"adm:send:55"
+    assert draft.buttons[0][0].type.data == b"adm:send"
 
-    confirm = await tap(admin, "adm:send:55")
+    confirm = await tap(admin, "adm:send")
     for task in list(admin._tasks):
         await task
     assert client.copied == [1, 2, 3]
     assert (
         bare(confirm.edited[-1]) == "Broadcast finished. 3 of 3: 3 sent, 0 unreachable, 0 failed."
     )
+
+
+async def test_only_the_drafted_message_can_be_broadcast(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.seen(1)
+    # A forged confirm, with no draft, or naming some other message.
+    await tap(admin, "adm:send:12")
+    await tap(admin, "adm:send")
+    assert client.copied == []
+
+    await tap(admin, "adm:cast")
+    with pytest.raises(events.StopPropagation):
+        await admin._admins_only(admin._on_draft)(Chat(7, text="news", message_id=55))
+    await tap(admin, "adm:send")
+    for task in list(admin._tasks):
+        await task
+    assert client.copied == [1]
+
+    # Sending it once used the draft up.
+    await tap(admin, "adm:send")
+    assert client.copied == [1]
+
+
+async def test_malformed_button_data_is_harmless(admin: Admin) -> None:
+    event = Chat(7)
+    event.data = b"adm:\xff\xfe"
+    with pytest.raises(events.StopPropagation):
+        await admin._admins_only(admin._on_button)(event)
+    assert event.answers == [""]
 
 
 async def test_a_broadcast_can_be_cancelled(admin: Admin) -> None:
@@ -220,3 +250,13 @@ async def test_answers_follow_the_admins_language(admin: Admin, store: Store) ->
     event = await tap(admin, "adm:join")
     assert "JOIN_CHANNEL" in event.answers[0]
     assert event.answers[0] == FA.alert("admin.join_unset")
+
+
+def test_the_panel_warns_when_the_join_check_lets_everyone_in(
+    client: FakeClient, config: Config, store: Store, tmp_path: Path
+) -> None:
+    admin = build_admin(client, config, store, tmp_path)
+    admin._membership = SimpleNamespace(broken=True)  # type: ignore[assignment]
+    store.set_switch("join", True)
+    text, _ = admin.panel(EN)
+    assert "everyone is let in" in text

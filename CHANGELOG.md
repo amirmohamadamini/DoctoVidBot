@@ -13,6 +13,26 @@
   turned into a document comes back from the cache channel next time, like a
   video made playable already did. The two are kept apart.
 
+### Security
+
+- **A file replaced after its menu opened is refused.** Telegram lets people
+  swap the file in their own message. The bot downloaded whatever was there
+  when the job ran, so a small file could be swapped for a large one past the
+  size and usage checks, and the cache could be made to hand the swapped file
+  to everyone who later sent the first one. Now the file must still be the one
+  offered, and replacing it closes its menu.
+- **The join rule no longer lets people in on every error.** Only a channel
+  set up wrong does that, and the admin panel then says so. Any other failure
+  asks the user to try again.
+- ffmpeg opens only the video containers and pictures the bot handles, never
+  playlists or lists of other files, and only local files. Thumbnails must be a
+  JPEG, PNG or WebP, judged by their content, not by the type the sender claims.
+- The bot keeps a tenth of the disk free, and at least 1 GB, instead of 256 MB.
+- A broadcast confirm can only send the message the admin drafted.
+- Memory kept per user for rate limits and membership is pruned.
+- CI actions are pinned to exact commits, and a new CI job checks the locked
+  dependencies for known vulnerabilities.
+
 ### Fixed
 
 - "1 files" and "1 people": counts now agree with their nouns.

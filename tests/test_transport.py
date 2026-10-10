@@ -3,14 +3,16 @@ from __future__ import annotations
 import contextlib
 import io
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from telethon.errors import FileReferenceExpiredError
 from telethon.tl.types import DocumentAttributeVideo
 
 from doctovid.media import MediaInfo
-from doctovid.transport import TelethonTransport
+from doctovid.transport import FileChanged, TelethonTransport
 
 
 async def ignore_progress(done: int, total: int) -> None:
@@ -42,6 +44,28 @@ class FakeClient:
 
     async def get_messages(self, chat_id: int, ids: int) -> Any:
         return self.messages.get(ids)
+
+    async def download_file(self, document: Any, dest: str, **kwargs: Any) -> None:
+        Path(dest).write_bytes(b"x" * kwargs["file_size"])
+
+
+def sent(document_id: int, size: int) -> Any:
+    return SimpleNamespace(
+        document=SimpleNamespace(id=document_id), media=object(), file=SimpleNamespace(size=size)
+    )
+
+
+async def test_a_file_is_downloaded_only_if_it_is_still_the_one_offered(tmp_path: Path) -> None:
+    client = FakeClient(messages={5: sent(9000, 3)})
+    transport = TelethonTransport(client)
+    dest = str(tmp_path / "source")
+
+    assert await transport.download(42, 5, dest, ignore_progress, document_id=9000, size=3)
+    with pytest.raises(FileChanged):
+        await transport.download(42, 5, dest, ignore_progress, document_id=1234, size=3)
+    with pytest.raises(FileChanged):
+        await transport.download(42, 5, dest, ignore_progress, document_id=9000, size=4)
+    assert not await transport.download(42, 6, dest, ignore_progress, document_id=9000, size=3)
 
 
 async def test_the_chosen_name_is_the_uploaded_name() -> None:

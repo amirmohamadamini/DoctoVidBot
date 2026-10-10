@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -11,7 +13,7 @@ from doctovid.config import Config
 from doctovid.i18n import RLM
 from doctovid.jobs import Mode
 from doctovid.quota import Calendar, Usage
-from doctovid.runner import DISK_MARGIN_BYTES, Runner
+from doctovid.runner import MIN_DISK_MARGIN_BYTES, Runner, usable_disk
 from doctovid.store import Store
 from doctovid.tools import LocalTools
 
@@ -259,7 +261,7 @@ async def test_a_floodwait_tells_the_user_how_long(
 async def test_a_job_that_would_fill_the_disk_is_refused(
     config: Config, store: Store, telegram: FakeTransport
 ) -> None:
-    runner = Runner(config, store, telegram, free_bytes=lambda _: DISK_MARGIN_BYTES + 500)
+    runner = Runner(config, store, telegram, usable_bytes=lambda _: 500)
     request = make_request("doc.pdf", is_video=False, size=1000)
 
     await runner(make_job(request, mode=Mode.FILE))
@@ -270,9 +272,22 @@ async def test_a_job_that_would_fill_the_disk_is_refused(
 
 async def test_a_video_reserves_room_for_its_remux(config: Config, store: Store) -> None:
     telegram = FakeTransport()
-    runner = Runner(config, store, telegram, free_bytes=lambda _: DISK_MARGIN_BYTES + 1500)
+    runner = Runner(config, store, telegram, usable_bytes=lambda _: 1500)
     await runner(make_job(make_request("film.mkv", size=1000), mode=Mode.VIDEO))
     assert "disk space" in telegram.edits[-1]
+
+
+def test_a_tenth_of_the_disk_stays_free(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gb = 1024**3
+
+    def disk(total: int, free: int) -> None:
+        usage = SimpleNamespace(total=total, used=total - free, free=free)
+        monkeypatch.setattr(shutil, "disk_usage", lambda _: usage)
+
+    disk(total=100 * gb, free=30 * gb)
+    assert usable_disk(tmp_path) == 20 * gb
+    disk(total=5 * gb, free=3 * gb)
+    assert usable_disk(tmp_path) == 3 * gb - MIN_DISK_MARGIN_BYTES
 
 
 # ---------------------------------------------------------------- usage
@@ -379,3 +394,18 @@ async def test_a_failure_is_explained_in_persian(
     runner = Runner(config, store, telegram, locale_for=lambda _user_id: FA)
     await runner(make_job(make_request("gone.pdf", is_video=False), mode=Mode.FILE))
     assert bare(telegram.edits[-1]) == "⚠️ " + bare(FA.phrase("job.gone"))
+
+
+@pytest.mark.usefixtures("movie")
+async def test_a_file_replaced_after_the_menu_is_refused(
+    runner: Runner, telegram: FakeTransport, store: Store
+) -> None:
+    # Someone sends a small video, then swaps a large one into the message.
+    store.set_cache_enabled(True)
+    telegram.replaced.add(100)
+    await runner(make_job(make_request("movie.mp4"), mode=Mode.FILE))
+
+    assert telegram.uploads == []
+    assert store.cache_size() == 0
+    assert "different file" in telegram.edits[-1]
+    assert store.usage(42, Calendar("UTC").today())[0] == Usage()

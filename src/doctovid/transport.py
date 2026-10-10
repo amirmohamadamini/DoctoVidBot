@@ -46,11 +46,29 @@ class Key(NamedTuple):
 Keyboard = Sequence[Sequence[Key]]
 
 
+class FileChanged(Exception):
+    """The message now holds another file than the one the menu was opened for.
+
+    Telegram lets people replace the file in their own message for two days.
+    Downloading whatever is there now would bypass the size and usage checks,
+    and put a different file in the cache under the first one's id.
+    """
+
+
 class Transport(Protocol):
     async def download(
-        self, chat_id: int, message_id: int, dest: str, progress: ProgressCallback
+        self,
+        chat_id: int,
+        message_id: int,
+        dest: str,
+        progress: ProgressCallback,
+        *,
+        document_id: int,
+        size: int,
     ) -> bool:
-        """Fetch a message's file to `dest`. False if the message is gone."""
+        """Fetch a message's file to `dest`. False if the message is gone.
+        Raises FileChanged unless it still holds document `document_id` of
+        `size` bytes."""
 
     async def upload(
         self,
@@ -116,15 +134,24 @@ class TelethonTransport:
         self._client = client
 
     async def download(
-        self, chat_id: int, message_id: int, dest: str, progress: ProgressCallback
+        self,
+        chat_id: int,
+        message_id: int,
+        dest: str,
+        progress: ProgressCallback,
+        *,
+        document_id: int,
+        size: int,
     ) -> bool:
         # Fetched again rather than kept from when it arrived: file references
         # expire, and a job can wait in the queue for a long time.
         message = await self._client.get_messages(chat_id, ids=message_id)
-        if message is None or message.media is None:
+        if message is None or message.document is None:
             return False
+        if message.document.id != document_id or message.file.size != size:
+            raise FileChanged
         await self._client.download_file(
-            message.document or message.media,
+            message.document,
             dest,
             part_size_kb=PART_SIZE_KB,
             file_size=message.file.size,

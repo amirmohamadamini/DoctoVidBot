@@ -219,3 +219,36 @@ async def test_a_film_that_grows_when_its_audio_is_converted(
     # through thanks to a fixed 16 MB of slack, which a long enough film uses up.
     assert grown > source * 2
     assert grown <= media.remux_bound(source, info)
+
+
+def test_picture_signatures() -> None:
+    assert media.looks_like_picture(b"\xff\xd8\xff\xe0" + b"\0" * 8)
+    assert media.looks_like_picture(b"\x89PNG\r\n\x1a\n\0\0\0\0")
+    assert media.looks_like_picture(b"RIFF\0\0\0\0WEBP")
+    assert not media.looks_like_picture(b"<svg xmlns=")
+    assert not media.looks_like_picture(b"\0\0\0\x18ftypmp42")
+
+
+@needs_ffmpeg
+async def test_a_video_is_not_taken_as_a_thumbnail(make_clip: MakeClip, tmp_path: Path) -> None:
+    # The type a sender claims for a file is theirs to choose.
+    clip = make_clip("clip.mp4")
+    assert not await media.fit_thumbnail(str(clip), str(tmp_path / "out.jpg"))
+
+
+@needs_ffmpeg
+async def test_playlists_are_not_opened(make_clip: MakeClip, tmp_path: Path) -> None:
+    # A playlist names other files for ffmpeg to read: here, another job's.
+    clip = make_clip("other-job.mp4")
+    playlist = tmp_path / "source.m3u8"
+    playlist.write_text(f"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n{clip}\n#EXT-X-ENDLIST\n")
+    assert await media.probe(str(clip)) is not None
+    assert await media.probe(str(playlist)) is None
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("name", ["clip.mkv", "clip.avi", "clip.webm", "clip.ts", "clip.mov"])
+async def test_every_supported_container_still_opens(make_clip: MakeClip, name: str) -> None:
+    video = "libvpx" if name.endswith(".webm") else "mpeg4"
+    audio = "libvorbis" if name.endswith(".webm") else "aac"
+    assert await media.probe(str(make_clip(name, video=video, audio=audio))) is not None

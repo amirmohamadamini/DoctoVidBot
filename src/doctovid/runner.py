@@ -22,7 +22,7 @@ from .quota import Calendar
 from .safefile import UnsafeFile, claim, read_small
 from .store import Store
 from .tools import LocalTools, MediaTools, WorkerUnavailable
-from .transport import DANGER, Key, Keyboard, Transport
+from .transport import DANGER, FileChanged, Key, Keyboard, Transport
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +33,10 @@ SOURCE_FILE = "source"
 PLAYABLE_FILE = "playable.mp4"
 THUMBNAIL_FILE = "thumbnail.jpg"
 
-#: Left free for the database, the session and thumbnails.
-DISK_MARGIN_BYTES = 256 * 1024 * 1024
+#: Disk the bot leaves free for everything else on the host: Docker itself,
+#: logs, the database. A tenth of the disk, and never less than this. The
+#: scratch volume is an ordinary Docker volume, so its free space is the host's.
+MIN_DISK_MARGIN_BYTES = 1024**3
 
 #: Telegram rejects thumbnails over 200 KB; anything much bigger isn't one.
 THUMBNAIL_READ_LIMIT = 1024 * 1024
@@ -69,8 +71,10 @@ def space_needed(job: Job) -> int:
     return job.request.size * (2 if job.mode is Mode.VIDEO else 1)
 
 
-def free_disk(path: Path) -> int:
-    return shutil.disk_usage(path).free
+def usable_disk(path: Path) -> int:
+    """Free space jobs may use: what is free, less the margin."""
+    usage = shutil.disk_usage(path)
+    return usage.free - max(MIN_DISK_MARGIN_BYTES, usage.total // 10)
 
 
 def cache_key(job: Job) -> str | None:
@@ -96,7 +100,7 @@ class Runner:
         transport: Transport,
         *,
         now: Callable[[], float] = time.monotonic,
-        free_bytes: Callable[[Path], int] = free_disk,
+        usable_bytes: Callable[[Path], int] = usable_disk,
         calendar: Calendar | None = None,
         tools: MediaTools | None = None,
         locale_for: Callable[[int], Locale] | None = None,
@@ -109,7 +113,7 @@ class Runner:
         self._store = store
         self._telegram = transport
         self._now = now
-        self._free_bytes = free_bytes
+        self._usable_bytes = usable_bytes
         #: Bytes promised to jobs already running. Their files are still
         #: growing, so free space alone would let every worker start a large
         #: download at once and all of them run out of room halfway.
@@ -151,7 +155,7 @@ class Runner:
             return
 
         needed = space_needed(job)
-        if self._free_bytes(workdir) - self._reserved - needed < DISK_MARGIN_BYTES:
+        if self._usable_bytes(workdir) - self._reserved < needed:
             raise JobFailed("job.disk")
         self._reserved += needed
         try:
@@ -183,7 +187,18 @@ class Runner:
         name = job.request.file_name
         await self._status(job, self._t(job).text("job.downloading", name=name), cancellable=True)
         report = self._transfer_bar(job, "progress.downloading", name)
-        found = await self._telegram.download(job.user_id, job.request.message_id, dest, report)
+        try:
+            found = await self._telegram.download(
+                job.user_id,
+                job.request.message_id,
+                dest,
+                report,
+                document_id=job.request.document_id,
+                size=job.request.size,
+            )
+        except FileChanged:
+            log.info("job %s: the file was replaced after the menu opened", job.id)
+            raise JobFailed("job.changed") from None
         if not found:
             raise JobFailed("job.gone")
 

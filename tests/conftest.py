@@ -15,7 +15,7 @@ from doctovid.jobs import Job, Mode, Request
 from doctovid.media import MediaInfo
 from doctovid.progress import ProgressCallback
 from doctovid.store import Store
-from doctovid.transport import Keyboard
+from doctovid.transport import FileChanged, Keyboard
 
 needs_ffmpeg = pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
@@ -111,14 +111,24 @@ class FakeTransport:
     edits: list[str] = field(default_factory=list)
     deleted: list[int] = field(default_factory=list)
     gone: set[int] = field(default_factory=set)
+    replaced: set[int] = field(default_factory=set)
     next_id: int = 1000
 
     async def download(
-        self, chat_id: int, message_id: int, dest: str, progress: ProgressCallback
+        self,
+        chat_id: int,
+        message_id: int,
+        dest: str,
+        progress: ProgressCallback,
+        *,
+        document_id: int,
+        size: int,
     ) -> bool:
         source = self.sent_files.get(message_id)
         if source is None:
             return False
+        if message_id in self.replaced:
+            raise FileChanged
         shutil.copyfile(source, dest)
         size = source.stat().st_size
         await progress(size, size)

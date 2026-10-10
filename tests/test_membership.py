@@ -3,10 +3,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
-from telethon.errors import ChatAdminRequiredError, UserNotParticipantError
+import pytest
+from telethon.errors import ChatAdminRequiredError, FloodWaitError, UserNotParticipantError
 from telethon.tl.types import ChannelParticipant, ChannelParticipantLeft, PeerUser
 
-from doctovid.membership import MEMBER_TTL_S, Membership
+from doctovid.membership import MEMBER_TTL_S, CheckFailed, Membership
 
 from .conftest import EN
 
@@ -52,9 +53,33 @@ async def test_non_members_are_asked_about_every_time() -> None:
     assert client.asked == 2
 
 
-async def test_a_broken_setup_lets_people_in() -> None:
-    membership = Membership(FakeClient(ChatAdminRequiredError(request=None)), "news")
+async def test_a_broken_setup_lets_people_in_and_says_so() -> None:
+    membership = Membership(FakeClient(ChatAdminRequiredError(request=None), MEMBER), "news")
     assert await membership.is_member(1)
+    assert membership.broken
+    assert await membership.is_member(2)
+    assert not membership.broken
+
+
+@pytest.mark.parametrize(
+    "error", [FloodWaitError(request=None, capture=120), ValueError("Could not find the input")]
+)
+async def test_any_other_failure_lets_nobody_in(error: Exception) -> None:
+    membership = Membership(FakeClient(error), "news")
+    with pytest.raises(CheckFailed):
+        await membership.is_member(1)
+    assert not membership.broken
+
+
+async def test_expired_confirmations_are_forgotten() -> None:
+    clock = [0.0]
+    membership = Membership(FakeClient(MEMBER, MEMBER), "news", now=lambda: clock[0])
+    await membership.is_member(1)
+    clock[0] = MEMBER_TTL_S / 2
+    await membership.is_member(2)
+    clock[0] = MEMBER_TTL_S + 1
+    membership.forget_expired()
+    assert list(membership._confirmed) == [2]
 
 
 async def test_problem_reports_a_bot_that_is_not_an_admin() -> None:

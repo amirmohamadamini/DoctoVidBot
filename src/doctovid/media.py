@@ -46,6 +46,22 @@ STDERR_LIMIT_BYTES = 256 * 1024
 #: done. Two is plenty for copying streams or decoding a single frame.
 FFMPEG_THREADS = 2
 
+#: The formats ffmpeg may open: the video containers in `names.VIDEO_EXTENSIONS`
+#: and the pictures accepted as thumbnails. Some formats are lists of other
+#: files to read (HLS playlists, concat lists), which is the usual way to make
+#: ffmpeg read something it wasn't given; those are left out, and inputs are
+#: plain files, never URLs.
+DEMUXERS = (
+    "mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "avi", "flv", "mpegts", "mpeg", "asf", "ogg",
+    "image2", "jpeg_pipe", "png_pipe", "webp_pipe",
+)  # fmt: skip
+LOCAL_ONLY = ("-protocol_whitelist", "file", "-format_whitelist", ",".join(DEMUXERS))
+
+#: How a picture file starts: JPEG, PNG, WebP. Telegram's photos are JPEG.
+#: Anything else sent as a thumbnail is refused before ffmpeg sees it, since
+#: the type a sender claims for a file is whatever they say it is.
+PICTURE_SIGNATURES = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")
+
 #: The bitrate audio is converted to when MP4 can't carry it as it is. Set
 #: rather than left to ffmpeg, because the most a remux can write depends on it.
 AAC_BITRATE = 192_000
@@ -151,7 +167,10 @@ def _number(value: Any) -> float:
 
 
 async def _ffprobe(path: str) -> dict[str, Any] | None:
-    command = ["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams"]
+    command = [
+        "ffprobe", "-v", "error", *LOCAL_ONLY,
+        "-print_format", "json", "-show_format", "-show_streams",
+    ]  # fmt: skip
     process = await _spawn([*command, path], max_file_bytes=0, stdout=asyncio.subprocess.PIPE)
     assert process.stdout is not None
     assert process.stderr is not None
@@ -205,7 +224,7 @@ async def remux(
     # fmt: off
     command = [
         "ffmpeg", "-nostdin", "-y", "-progress", "pipe:1", "-nostats",
-        "-threads", str(FFMPEG_THREADS), "-i", source,
+        "-threads", str(FFMPEG_THREADS), *LOCAL_ONLY, "-i", source,
         "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
         "-c:v", "copy", "-c:a", audio,
         *(["-b:a", str(AAC_BITRATE)] if audio == "aac" else []),
@@ -328,11 +347,23 @@ async def frame_thumbnail(video: str, target: str, duration_s: float) -> bool:
     return await _ffmpeg_image("-ss", str(seek), "-i", video, target=target)
 
 
+def looks_like_picture(head: bytes) -> bool:
+    """Whether a file's first bytes are those of a JPEG, PNG or WebP."""
+    webp = head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    return webp or head.startswith(PICTURE_SIGNATURES)
+
+
 async def fit_thumbnail(image: str, target: str) -> bool:
     """Shrink a user's picture to what Telegram accepts as a thumbnail.
 
-    Its size is read from the header before anything decodes it.
+    Its type is checked from its first bytes, and its size read from the
+    header, before anything decodes it.
     """
+    with open(image, "rb") as file:  # noqa: ASYNC230 - twelve bytes
+        head = file.read(12)
+    if not looks_like_picture(head):
+        log.info("refusing a thumbnail that isn't a JPEG, PNG or WebP")
+        return False
     info = await probe(image)
     if info is None or not info.width or not info.height:
         return False
@@ -346,7 +377,7 @@ async def _ffmpeg_image(*inputs: str, target: str) -> bool:
     # fmt: off
     command = [
         "ffmpeg", "-nostdin", "-y",
-        "-threads", str(FFMPEG_THREADS), "-filter_threads", "1", *inputs,
+        "-threads", str(FFMPEG_THREADS), "-filter_threads", "1", *LOCAL_ONLY, *inputs,
         "-frames:v", "1", "-vf", _FIT, "-q:v", "4", target,
     ]
     # fmt: on

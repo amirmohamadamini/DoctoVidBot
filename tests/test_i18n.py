@@ -20,6 +20,7 @@ ALERTS = {
     "queue.full": {},
     "join.prompt": {},
     "join.not_yet": {},
+    "join.check_failed": {},
     "admin.cache_off": {},
     "admin.cache_unset": {},
     "admin.join_unset": {},

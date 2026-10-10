@@ -83,6 +83,12 @@ the same official image. The Telegram session and the bot's small database
 live in the `data` volume, so rebuilding the image doesn't log the bot in
 again.
 
+**Disk space.** Files are downloaded and repacked on the host's disk, and a
+video can need twice its size while it's repacked. With the default two files
+at a time, that is up to 8 GB for two 2 GB videos. The bot never fills the disk:
+it keeps a tenth of it free, and at least 1 GB, and turns files away with
+"short of disk space" rather than go below that.
+
 ### Settings
 
 All settings are in `.env`. [`.env.example`](.env.example) explains each one.
@@ -157,9 +163,13 @@ You can make people join a channel before they use the bot.
    checks it can see the members first.
 
 Anyone who isn't a member gets a button to join and an "I've joined" button.
-Admins never have to join. If the bot can't check (for example, it stopped
-being an admin of the channel), it lets people in rather than locking everyone
-out, and logs a warning. Tap the button again to turn the rule off.
+Admins never have to join. If the channel is set up wrong, for example the bot
+stopped being an admin there, it lets people in rather than locking everyone
+out: the admin panel shows a warning until it's fixed. If Telegram can't
+answer for any other reason, such as asking the bot to slow down, nobody gets
+in on that, and users are asked to try again in a minute. A membership the bot
+has confirmed is trusted for ten minutes. Tap the button again to turn the rule
+off.
 
 ### Broadcast
 
@@ -187,6 +197,10 @@ your bot.
 
 An admin only receives backups after they have sent the bot a message at least
 once, because Telegram doesn't let bots message people first.
+
+The backup lists the id of everyone who has used the bot, and it isn't
+encrypted. Double-check the ids in `ADMIN_IDS`: whoever owns a mistyped id gets
+your user list, as soon as they've used the bot once.
 
 To restore, unzip the backup next to `compose.yaml`, then copy `doctovid.db`
 into the data volume while the bot is stopped. Doing the copy from the bot's
@@ -282,9 +296,12 @@ The bot doesn't trust what comes back:
 ### What this doesn't cover
 
 - **A compromised worker can see other jobs' files while it stays
-  compromised.** It still can't reach the bot's session, the database, the
-  network or Telegram. Restarting the `media` service clears anything left
-  running in it.
+  compromised.** ffmpeg runs as the same user as the worker, so a file that
+  takes over ffmpeg takes over the worker too: it can answer the bot's
+  requests wrongly or refuse them until the `media` service restarts, and
+  nothing detects that automatically. It still can't reach the bot's session,
+  the database, the network or Telegram, and the bot checks everything the
+  worker sends back. Restarting the `media` service clears it.
 - **Running without Docker** (`uv run doctovid`) runs ffmpeg inside the bot
   process, and the bot logs a warning saying so. That's fine for trying the bot
   out, not for serving strangers.

@@ -26,7 +26,7 @@ from .broadcast import Broadcaster
 from .config import Config
 from .i18n import Html, Locale, Locales, plain
 from .jobs import Job, JobQueue, Mode, QueueFull, Request, UserLimit
-from .membership import MEMBERS_FIX, POSTING_FIX, Membership, channel_problem
+from .membership import MEMBERS_FIX, POSTING_FIX, CheckFailed, Membership, channel_problem
 from .names import apply_rename, looks_like_video, safe_name
 from .runner import THUMBNAIL_READ_LIMIT, Runner, cancel_button
 from .safefile import read_small
@@ -151,6 +151,9 @@ class Bot:
         self._admin.register()
         self._client.add_event_handler(
             self._on_message, events.NewMessage(incoming=True, func=_private)
+        )
+        self._client.add_event_handler(
+            self._on_edit, events.MessageEdited(incoming=True, func=_private)
         )
         self._client.add_event_handler(
             self._on_button,
@@ -346,15 +349,20 @@ class Bot:
         await self._nudge(event)
 
     async def _is_allowed(self, user_id: int) -> bool:
-        """The join-the-channel rule, when an admin has turned it on."""
+        """The join-the-channel rule, when an admin has turned it on. Raises
+        CheckFailed when Telegram couldn't say."""
         if self._admin.is_admin(user_id) or not self._admin.is_joining_required():
             return True
         assert self._membership is not None
         return await self._membership.is_member(user_id)
 
     async def _may_use(self, event: Any) -> bool:
-        if await self._is_allowed(event.sender_id):
-            return True
+        try:
+            if await self._is_allowed(event.sender_id):
+                return True
+        except CheckFailed:
+            await event.reply(self.locale_for(event.sender_id).text("join.check_failed"))
+            return False
         assert self._config.join_link is not None
         text, keyboard = menus.join_required(
             self._config.join_link, self.locale_for(event.sender_id)
@@ -394,6 +402,19 @@ class Bot:
         menu = await event.reply(text, buttons=to_buttons(keyboard))
         request.menu_message_id = menu.id
         self._requests[request.id] = request
+
+    async def _on_edit(self, event: Any) -> None:
+        """A file replaced in its message closes the menu opened for it. A new
+        caption on the same file changes nothing."""
+        document = event.message.document
+        for request in list(self._requests.values()):
+            if request.user_id != event.sender_id or request.message_id != event.message.id:
+                continue
+            if document is not None and document.id == request.document_id:
+                continue
+            self._close(request)
+            t = self.locale_for(request.user_id)
+            await self._edit(request.user_id, request.menu_message_id, t.text("menu.replaced"))
 
     async def _take_name(self, event: Any, prompt: Prompt) -> None:
         del self._prompts[event.sender_id]
@@ -527,7 +548,12 @@ class Bot:
         t = self.locale_for(request.user_id)
         # Checked again when it matters: the menu may have been opened before
         # the join rule was turned on, or before they left the channel.
-        if not await self._is_allowed(request.user_id):
+        try:
+            allowed = await self._is_allowed(request.user_id)
+        except CheckFailed:
+            await event.answer(t.alert("join.check_failed"), alert=True)
+            return
+        if not allowed:
             await event.answer(t.alert("join.prompt"), alert=True)
             return
         # Also again: other files may have been sent since this menu opened.
@@ -554,7 +580,12 @@ class Bot:
 
     async def _check_joined(self, event: Any) -> None:
         t = self.locale_for(event.sender_id)
-        if self._membership is None or await self._membership.is_member(event.sender_id):
+        try:
+            member = self._membership is None or await self._membership.is_member(event.sender_id)
+        except CheckFailed:
+            await event.answer(t.alert("join.check_failed"), alert=True)
+            return
+        if member:
             await event.answer(t.alert("join.thanks_alert"))
             await event.edit(t.text("join.thanks"))
         else:
@@ -628,8 +659,15 @@ class Bot:
             await self.sweep()
 
     async def sweep(self) -> None:
-        """Close menus nobody answered, and free what they held."""
+        """Close menus nobody answered, free what they held, and forget
+        what is too old to matter, so memory doesn't grow with every user."""
         now = self._now()
+        hour_ago = now - 3600
+        for user_id, attempts in list(self._thumbnail_attempts.items()):
+            if all(at <= hour_ago for at in attempts):
+                del self._thumbnail_attempts[user_id]
+        if self._membership is not None:
+            self._membership.forget_expired()
         for request in [r for r in self._requests.values() if r.expires_at <= now]:
             self._close(request)
             await self._edit(

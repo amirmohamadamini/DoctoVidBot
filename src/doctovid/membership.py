@@ -27,6 +27,19 @@ log = logging.getLogger(__name__)
 MEMBER_TTL_S = 600.0
 
 
+#: Errors that mean the channel is set up wrong, not that this user is a
+#: problem: the bot isn't an admin there, or the channel is gone. Locking every
+#: user out over a setup mistake would be worse than letting them in, so these
+#: let people in, and the admin panel says so.
+SETUP_ERRORS = (ChatAdminRequiredError, ChannelPrivateError, ChannelInvalidError)
+
+
+class CheckFailed(Exception):
+    """Membership couldn't be checked this time, for example because Telegram
+    asked the bot to slow down. The user is asked to try again: a user who can
+    cause such an error mustn't be able to get past the rule with it."""
+
+
 #: What to tell an admin when the bot is in a channel without the right it
 #: needs: the keys of the messages.
 POSTING_FIX = "channel.fix_posting"
@@ -62,19 +75,24 @@ class Membership:
         self._channel = channel
         self._now = now
         self._confirmed: dict[int, float] = {}
+        #: Whether the last check failed on a setup mistake and let someone in.
+        self.broken = False
 
     async def is_member(self, user_id: int) -> bool:
+        """Raises CheckFailed if Telegram couldn't answer."""
         confirmed_at = self._confirmed.get(user_id)
         if confirmed_at is not None and self._now() - confirmed_at < MEMBER_TTL_S:
             return True
         try:
             member = await self._ask(user_id)
-        except Exception:
-            # The bot can't see the channel's members: it isn't an admin
-            # there, or the channel is gone. Locking every user out over a
-            # setup mistake would be worse than letting them in.
-            log.warning("could not check channel membership, letting user in", exc_info=True)
+        except SETUP_ERRORS:
+            log.warning("can't see the channel's members, letting user in", exc_info=True)
+            self.broken = True
             return True
+        except Exception as exc:
+            log.warning("could not check channel membership: %r", exc)
+            raise CheckFailed from exc
+        self.broken = False
         if member:
             self._confirmed[user_id] = self._now()
         else:
@@ -91,6 +109,12 @@ class Membership:
         except Exception as exc:
             return channel_problem(exc, fix=MEMBERS_FIX, t=t)
         return None
+
+    def forget_expired(self) -> None:
+        now = self._now()
+        for user_id, confirmed_at in list(self._confirmed.items()):
+            if now - confirmed_at >= MEMBER_TTL_S:
+                del self._confirmed[user_id]
 
     async def _ask(self, user: Any) -> bool:
         try:
