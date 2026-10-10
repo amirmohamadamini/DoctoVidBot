@@ -17,23 +17,23 @@ def test_cache_is_off_until_turned_on(store: Store) -> None:
 
 
 def test_cache_index(store: Store) -> None:
-    assert store.cached("5:video") is None
-    store.remember("5:video", 10)
-    store.remember("5:video", 11)
-    assert store.cached("5:video") == 11
-    assert store.cache_size() == 1
-    store.forget("5:video")
-    assert store.cached("5:video") is None
+    assert store.cached(-100, "5:video") is None
+    store.remember(-100, "5:video", 10)
+    store.remember(-100, "5:video", 11)
+    assert store.cached(-100, "5:video") == 11
+    assert store.cache_size(-100) == 1
+    store.forget(-100, "5:video")
+    assert store.cached(-100, "5:video") is None
 
 
 def test_state_survives_a_restart(tmp_path: Path) -> None:
     first = Store(tmp_path / "db")
     first.set_cache_enabled(True)
-    first.remember("k", 3)
+    first.remember(-100, "k", 3)
     first.close()
     second = Store(tmp_path / "db")
     assert second.cache_enabled()
-    assert second.cached("k") == 3
+    assert second.cached(-100, "k") == 3
 
 
 def test_usage_by_day_and_month(store: Store) -> None:
@@ -79,3 +79,28 @@ def test_a_database_from_before_languages_is_upgraded(tmp_path: Path) -> None:
     store.set_language(42, "fa")
     assert store.language(42) == "fa"
     assert store.reachable_users() == [42]
+
+
+def test_cache_entries_belong_to_their_channel(store: Store) -> None:
+    store.remember(-100, "5:video", 27)
+    assert store.cached(-200, "5:video") is None
+    assert store.cache_size(-200) == 0
+    store.remember(-200, "5:video", 3)
+    assert (store.cached(-100, "5:video"), store.cached(-200, "5:video")) == (27, 3)
+
+
+def test_cache_entries_without_a_channel_are_dropped(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE cache (key TEXT PRIMARY KEY, message_id INTEGER NOT NULL, "
+        "created_at INTEGER NOT NULL)"
+    )
+    old.execute("INSERT INTO cache VALUES ('5:video', 27, 0)")
+    old.commit()
+    old.close()
+
+    store = Store(path)
+    assert store.cached(-100, "5:video") is None
+    store.remember(-100, "5:video", 28)
+    assert store.cached(-100, "5:video") == 28

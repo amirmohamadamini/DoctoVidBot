@@ -29,8 +29,15 @@ jobs:
       - run: uv export --frozen --no-dev --no-emit-project --format requirements-txt -o requirements.txt
       - run: uvx pip-audit@2.10.1 --strict --disable-pip --require-hashes -r requirements.txt
 
+  # Both containers, as deployed: separate users, no network for the worker,
+  # only the scratch volume shared. See tests/container_smoke.py.
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: docker build .
+      - run: cp .env.example .env
+      - run: docker compose build
+      - run: docker compose up -d media
+      - run: docker compose run --rm -T --no-deps bot python - < tests/container_smoke.py
+      - if: failure()
+        run: docker compose logs media

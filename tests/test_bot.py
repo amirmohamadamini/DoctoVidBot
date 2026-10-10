@@ -14,15 +14,17 @@ from telethon.tl.types import ChannelParticipant
 
 from doctovid import media
 from doctovid.bot import (
+    MAX_OPEN_MENUS,
     THUMBNAIL_ATTEMPTS_PER_HOUR,
     THUMBNAIL_MAX_BYTES,
     THUMBNAIL_SLOTS,
     Bot,
 )
 from doctovid.config import Config, load
+from doctovid.jobs import Job, Mode
 from doctovid.store import Store
 
-from .conftest import FA, MakeClip, bare, needs_ffmpeg
+from .conftest import FA, MakeClip, bare, make_request, needs_ffmpeg
 
 
 @dataclass
@@ -61,9 +63,16 @@ class Event:
     """Just enough of a Telethon NewMessage or CallbackQuery event."""
 
     def __init__(
-        self, client: FakeClient, sender: int, message: Any = None, data: str = ""
+        self,
+        client: FakeClient,
+        sender: int,
+        message: Any = None,
+        data: str = "",
+        message_id: int | None = None,
     ) -> None:
         self.sender_id = sender
+        #: For a button: the message it is on.
+        self.message_id = message_id
         self.message = message
         self.data = data.encode()
         self.raw_text = getattr(message, "raw_text", "")
@@ -98,6 +107,19 @@ def document(name: str, size: int = 1000, mime: str = "video/x-matroska") -> Any
     )
 
 
+def tap(bot: Bot, client: FakeClient, sender: int, data: str) -> Event:
+    """A tap on a button of the menu or status message that `data` belongs to."""
+    action, _, raw = data.partition(":")
+    message_id = None
+    if raw.isdigit():
+        if action == "stop":
+            job = bot._queue.find(int(raw))
+            message_id = None if job is None else job.status_message_id
+        elif (request := bot._requests.get(int(raw))) is not None:
+            message_id = request.menu_message_id
+    return Event(client, sender, data=data, message_id=message_id)
+
+
 def text(value: str) -> Any:
     return SimpleNamespace(raw_text=value, photo=None, file=None, document=None)
 
@@ -129,7 +151,7 @@ async def test_rename_then_the_menu_is_shown_again(bot: Bot, client: FakeClient)
     await bot._on_message(Event(client, 42, document("film.mkv")))
     menu = client.sent[0]
 
-    await bot._on_button(Event(client, 42, data="name:1"))
+    await bot._on_button(tap(bot, client, 42, "name:1"))
     prompt = client.sent[1]
     assert "new name" in prompt.text
 
@@ -141,27 +163,27 @@ async def test_rename_then_the_menu_is_shown_again(bot: Bot, client: FakeClient)
 
 async def test_someone_else_cannot_use_your_menu(bot: Bot, client: FakeClient) -> None:
     await bot._on_message(Event(client, 42, document("film.mkv")))
-    other = Event(client, 99, data="video:1")
+    other = tap(bot, client, 99, "video:1")
     await bot._on_button(other)
     assert "expired" in other.answers[0]
 
 
 async def test_choosing_an_action_queues_a_job(bot: Bot, client: FakeClient) -> None:
     await bot._on_message(Event(client, 42, document("film.mkv")))
-    await bot._on_button(Event(client, 42, data="video:1"))
+    await bot._on_button(tap(bot, client, 42, "video:1"))
     assert bot._queue.waiting == 1
     assert bare(client.edits[client.sent[0].id]).startswith("⏳ Starting")
 
 
 async def test_only_the_owner_can_cancel_a_job(bot: Bot, client: FakeClient) -> None:
     await bot._on_message(Event(client, 42, document("film.mkv")))
-    await bot._on_button(Event(client, 42, data="video:1"))
+    await bot._on_button(tap(bot, client, 42, "video:1"))
 
-    stranger = Event(client, 99, data="stop:1")
+    stranger = tap(bot, client, 99, "stop:1")
     await bot._on_button(stranger)
     assert bot._queue.waiting == 1
 
-    await bot._on_button(Event(client, 42, data="stop:1"))
+    await bot._on_button(tap(bot, client, 42, "stop:1"))
     assert bot._queue.waiting == 0
 
 
@@ -205,9 +227,9 @@ async def test_queued_files_count_against_the_limit(
     bot = Bot(client, config, store, now=lambda: 0.0)
     await bot._on_message(Event(client, 42, document("one.mkv")))
     await bot._on_message(Event(client, 42, document("two.mkv")))
-    await bot._on_button(Event(client, 42, data="video:1"))
+    await bot._on_button(tap(bot, client, 42, "video:1"))
 
-    second = Event(client, 42, data="video:2")
+    second = tap(bot, client, 42, "video:2")
     await bot._on_button(second)
     assert "today's limit of 1 file." in bare(second.answers[0])
 
@@ -282,7 +304,7 @@ async def test_members_and_admins_get_straight_in(store: Store, tmp_path: Path) 
 async def test_the_joined_button_checks_again(store: Store, tmp_path: Path) -> None:
     client = JoinClient(members=set())
     bot = joining_bot(client, store, tmp_path)
-    tapped = Event(client, 42, data="joined:0")
+    tapped = tap(bot, client, 42, "joined:0")
     await bot._on_button(tapped)
     assert "can't see you" in tapped.answers[0]
 
@@ -341,7 +363,7 @@ async def test_the_panel_button_does_nothing_for_others(bot: Bot, client: FakeCl
 
 async def test_a_keyboard_tap_is_not_taken_as_a_new_name(bot: Bot, client: FakeClient) -> None:
     await bot._on_message(Event(client, 42, document("film.mkv")))
-    await bot._on_button(Event(client, 42, data="name:1"))
+    await bot._on_button(tap(bot, client, 42, "name:1"))
     await bot._on_message(Event(client, 42, text("❓ Help")))
     assert bot._requests[1].new_name is None
 
@@ -369,7 +391,7 @@ class Picture:
 
 async def ask_for_thumbnail(bot: Bot, client: FakeClient) -> None:
     await bot._on_message(Event(client, 42, document("film.mkv")))
-    await bot._on_button(Event(client, 42, data="thumb:1"))
+    await bot._on_button(tap(bot, client, 42, "thumb:1"))
 
 
 async def test_an_oversized_thumbnail_is_never_downloaded(bot: Bot, client: FakeClient) -> None:
@@ -421,7 +443,7 @@ async def test_only_a_few_thumbnails_are_processed_at_once(
     for user in range(100, 106):
         await bot._on_message(Event(client, user, document("film.mkv")))
         request_id = max(bot._requests)
-        await bot._on_button(Event(client, user, data=f"thumb:{request_id}"))
+        await bot._on_button(tap(bot, client, user, f"thumb:{request_id}"))
         tasks.append(asyncio.create_task(bot._on_message(Event(client, user, Picture(100)))))
     for _ in range(10):
         await asyncio.sleep(0)
@@ -440,7 +462,7 @@ async def test_the_join_rule_is_checked_again_when_a_button_is_pressed(
     await bot._on_message(Event(client, 42, document("film.mkv")))
 
     store.set_switch("join", True)
-    tapped = Event(client, 42, data="video:1")
+    tapped = tap(bot, client, 42, "video:1")
     await bot._on_button(tapped)
 
     assert "join our channel" in tapped.answers[0]
@@ -466,7 +488,7 @@ async def test_thumbnail_attempts_are_rate_limited(
     await bot._on_message(Event(client, 42, document("film.mkv")))
     pictures = []
     for _ in range(THUMBNAIL_ATTEMPTS_PER_HOUR + 1):
-        await bot._on_button(Event(client, 42, data="thumb:1"))
+        await bot._on_button(tap(bot, client, 42, "thumb:1"))
         pictures.append(Picture(100))
         await bot._on_message(Event(client, 42, pictures[-1]))
 
@@ -533,7 +555,7 @@ async def test_the_first_start_asks_for_a_language(bot: Bot, client: FakeClient)
 
 
 async def test_choosing_persian(bot: Bot, client: FakeClient, store: Store) -> None:
-    choice = Event(client, 42, data="lang:fa")
+    choice = tap(bot, client, 42, "lang:fa")
     await bot._on_button(choice)
 
     assert store.language(42) == "fa"
@@ -558,7 +580,7 @@ async def test_the_language_button_marks_the_current_one(
 
 
 async def test_an_unknown_language_is_ignored(bot: Bot, client: FakeClient, store: Store) -> None:
-    await bot._on_button(Event(client, 42, data="lang:xx"))
+    await bot._on_button(tap(bot, client, 42, "lang:xx"))
     assert store.language(42) is None
     assert client.sent == []
 
@@ -590,7 +612,7 @@ async def test_a_persian_menu_reads_right_to_left(
 
 async def test_alerts_are_translated(bot: Bot, client: FakeClient, store: Store) -> None:
     store.set_language(42, "fa")
-    expired = Event(client, 42, data="video:99")
+    expired = tap(bot, client, 42, "video:99")
     await bot._on_button(expired)
     assert expired.answers == [FA.alert("menu.expired_alert")]
 
@@ -629,7 +651,7 @@ async def test_replacing_the_file_closes_its_menu(bot: Bot, client: FakeClient) 
     assert bot._requests == {}
     assert "replaced the file" in client.edits[menu.id]
 
-    stale = Event(client, 42, data="video:1")
+    stale = tap(bot, client, 42, "video:1")
     await bot._on_button(stale)
     assert bot._queue.waiting == 0
 
@@ -652,3 +674,194 @@ async def test_the_sweep_forgets_old_thumbnail_attempts(
     clock[0] = 3601
     await bot.sweep()
     assert list(bot._thumbnail_attempts) == [43]
+
+
+# ---------------------------------------------------------------- races
+
+
+async def test_two_taps_at_once_queue_one_job(bot: Bot, client: FakeClient) -> None:
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    both_waiting = asyncio.Event()
+    arrived = 0
+
+    async def slow_check(user_id: int) -> bool:
+        nonlocal arrived
+        arrived += 1
+        if arrived == 2:
+            both_waiting.set()
+        await both_waiting.wait()
+        return True
+
+    bot._is_allowed = slow_check  # type: ignore[method-assign]
+    first, second = tap(bot, client, 42, "video:1"), tap(bot, client, 42, "video:1")
+    await asyncio.gather(bot._on_button(first), bot._on_button(second))
+    assert len(bot._queue.jobs_for(42)) == 1
+
+
+async def test_a_refused_job_leaves_its_menu_open(
+    client: FakeClient, store: Store, tmp_path: Path
+) -> None:
+    config = load({"API_ID": "1", "API_HASH": "h", "BOT_TOKEN": "t", "DATA_DIR": str(tmp_path)})
+    bot = Bot(client, config, store, now=lambda: 0.0)
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    bot._queue._max_waiting = 0
+    for _ in range(config.workers):
+        filler = Job(id=bot._queue.next_id(), request=make_request(user_id=7), mode=Mode.FILE)
+        await bot._queue.submit(filler)
+    refused = tap(bot, client, 42, "video:1")
+    await bot._on_button(refused)
+    assert "busy" in refused.answers[0]
+    assert list(bot._requests) == [1]
+
+
+async def test_files_arriving_together_respect_the_menu_limit(config: Config, store: Store) -> None:
+    class SlowReplies(FakeClient):
+        async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> Sent:
+            await asyncio.sleep(0)
+            return await super().send_message(chat_id, text, **kwargs)
+
+    client = SlowReplies()
+    bot = Bot(client, config, store, now=lambda: 0.0)
+    await asyncio.gather(
+        *(bot._on_message(Event(client, 42, document("film.mkv"))) for _ in range(12))
+    )
+    assert len(bot._requests) == MAX_OPEN_MENUS
+
+
+async def test_an_old_menu_does_nothing_after_a_restart(bot: Bot, client: FakeClient) -> None:
+    # Request numbers start again at 1: the old menu's "file:1" names the new file.
+    await bot._on_message(Event(client, 42, document("new-file.mkv")))
+    old_menu = Event(client, 42, data="file:1", message_id=123)
+    await bot._on_button(old_menu)
+    assert bot._queue.jobs_for(42) == []
+    assert "expired" in old_menu.answers[0]
+
+
+async def test_an_old_cancel_button_does_nothing_after_a_restart(
+    bot: Bot, client: FakeClient
+) -> None:
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    await bot._on_button(tap(bot, client, 42, "video:1"))
+    await bot._on_button(Event(client, 42, data="stop:1", message_id=123))
+    assert bot._queue.waiting == 1
+
+
+class SlowDeletes(FakeClient):
+    """Deleting a message waits until `go` is set."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deleting = asyncio.Event()
+        self.go = asyncio.Event()
+
+    async def delete_messages(self, chat_id: int, ids: list[int]) -> None:
+        self.deleting.set()
+        await self.go.wait()
+        await super().delete_messages(chat_id, ids)
+
+
+async def test_a_menu_being_renamed_waits_before_it_can_be_sent(
+    config: Config, store: Store
+) -> None:
+    client = SlowDeletes()
+    bot = Bot(client, config, store, now=lambda: 0.0)
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    client.go.set()
+    await bot._on_button(tap(bot, client, 42, "name:1"))
+    client.go.clear()
+    client.deleting.clear()
+
+    renaming = asyncio.create_task(bot._on_message(Event(client, 42, text("holiday"))))
+    await client.deleting.wait()
+    early = tap(bot, client, 42, "video:1")
+    await bot._on_button(early)
+    assert bot._queue.waiting == 0
+    assert "One moment" in early.answers[0]
+
+    client.go.set()
+    await renaming
+    await bot._on_button(tap(bot, client, 42, "video:1"))
+    [job] = bot._queue.jobs_for(42)
+    assert job.request.new_name == "holiday.mkv"
+
+
+async def test_a_menu_cancelled_mid_rename_is_not_sent_again(config: Config, store: Store) -> None:
+    client = SlowDeletes()
+    bot = Bot(client, config, store, now=lambda: 0.0)
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    client.go.set()
+    await bot._on_button(tap(bot, client, 42, "name:1"))
+    client.go.clear()
+    client.deleting.clear()
+    sent_before = len(client.sent)
+
+    renaming = asyncio.create_task(bot._on_message(Event(client, 42, text("holiday"))))
+    await client.deleting.wait()
+    await bot._on_button(tap(bot, client, 42, "drop:1"))
+    client.go.set()
+    await renaming
+
+    assert bot._requests == {}
+    assert len(client.sent) == sent_before
+
+
+def test_a_job_keeps_the_status_message_it_was_queued_with() -> None:
+    request = make_request(menu_message_id=500)
+    job = Job(id=1, request=request, mode=Mode.VIDEO)
+    request.menu_message_id = 502
+    assert job.status_message_id == 500
+
+
+async def started_submission(
+    bot: Bot, client: FakeClient
+) -> tuple[asyncio.Task[None], asyncio.Event]:
+    """A tap on "Make playable" that is waiting on the join check."""
+    checking, answer = asyncio.Event(), asyncio.Event()
+
+    async def slow_check(user_id: int) -> bool:
+        checking.set()
+        await answer.wait()
+        return True
+
+    bot._is_allowed = slow_check  # type: ignore[method-assign]
+    submitting = asyncio.create_task(bot._on_button(tap(bot, client, 42, "video:1")))
+    await checking.wait()
+    return submitting, answer
+
+
+async def test_a_rename_started_during_the_join_check_holds_the_submission(
+    config: Config, store: Store
+) -> None:
+    client = SlowDeletes()
+    client.go.set()
+    bot = Bot(client, config, store, now=lambda: 0.0)
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    await bot._on_button(tap(bot, client, 42, "name:1"))
+    client.go.clear()
+    client.deleting.clear()
+
+    submitting, answer = await started_submission(bot, client)
+    renaming = asyncio.create_task(bot._on_message(Event(client, 42, text("holiday"))))
+    await client.deleting.wait()
+    answer.set()
+    await submitting
+    assert bot._queue.waiting == 0
+
+    client.go.set()
+    await renaming
+    assert bot._requests[1].new_name == "holiday.mkv"
+
+
+async def test_a_rename_finished_during_the_join_check_voids_the_old_tap(
+    bot: Bot, client: FakeClient
+) -> None:
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    await bot._on_button(tap(bot, client, 42, "name:1"))
+
+    submitting, answer = await started_submission(bot, client)
+    await bot._on_message(Event(client, 42, text("holiday")))
+    answer.set()
+    await submitting
+    # The tap was on the old menu, for the old name.
+    assert bot._queue.waiting == 0
+    assert list(bot._requests) == [1]

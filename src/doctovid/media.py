@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import shutil
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -81,6 +82,10 @@ PLAYABLE_VIDEO_CODECS = frozenset({"h264", "hevc", "av1", "mpeg4"})
 #: is cheap; the alternative is a video that plays without sound.
 PLAYABLE_AUDIO_CODECS = frozenset({"aac", "mp3", "alac"})
 
+#: Top-level boxes read looking for an MP4's index before giving up. A real
+#: file has a handful before its index or its media.
+MP4_BOXES_READ = 32
+
 #: ffprobe reports every ISO media file as "mov,mp4,m4a,3gp,3g2,mj2".
 _MP4_FAMILY = frozenset({"mov", "mp4"})
 
@@ -99,6 +104,9 @@ class MediaInfo:
     duration_s: float = 0.0
     width: int = 0
     height: int = 0
+    #: For an MP4: whether its index comes before the media data. See
+    #: `index_first`.
+    index_first: bool = False
 
     @property
     def is_video(self) -> bool:
@@ -108,7 +116,7 @@ class MediaInfo:
     def plan(self) -> Plan:
         if self.video_codec not in PLAYABLE_VIDEO_CODECS:
             return Plan.UNSUPPORTED
-        if self.formats & _MP4_FAMILY and self.audio_fits:
+        if self.formats & _MP4_FAMILY and self.audio_fits and self.index_first:
             return Plan.READY
         return Plan.REMUX
 
@@ -124,12 +132,48 @@ async def probe(path: str) -> MediaInfo | None:
 
 
 async def run_ffprobe(path: str) -> dict[str, Any] | None:
-    """ffprobe's report on a file, or None if it could not read it."""
+    """ffprobe's report on a file, or None if it could not read it, with
+    whether its index comes first added as `index_first`."""
     try:
-        return await _ffprobe(path)
+        raw = await _ffprobe(path)
+        if raw is not None:
+            raw["index_first"] = await asyncio.to_thread(index_first, path)
     except (OSError, TimeoutError) as exc:
         log.warning("ffprobe failed: %s", exc)
         return None
+    return raw
+
+
+def index_first(path: str) -> bool:
+    """Whether an MP4's index (its `moov` box) comes before the media data.
+
+    A player needs the index to start. Many cameras and editors write it
+    last, after the media; such a file plays only once all of it has arrived,
+    however it is sent. Moving the index to the front is what `+faststart`
+    does, and a quick remux does it. Only the top-level box headers are read.
+    """
+    with open(path, "rb") as file:
+        for _ in range(MP4_BOXES_READ):
+            header = file.read(8)
+            if len(header) < 8:
+                return False
+            size, kind = int.from_bytes(header[:4]), header[4:]
+            if kind == b"moov":
+                return True
+            if kind in (b"mdat", b"moof"):
+                return False
+            if size == 1:
+                large = file.read(8)
+                if len(large) < 8:
+                    return False
+                size, header_size = int.from_bytes(large), 16
+            else:
+                header_size = 8
+            if size < header_size:
+                # 0 means "to the end of the file"; anything else is damage.
+                return False
+            file.seek(size - header_size, os.SEEK_CUR)
+    return False
 
 
 def parse(raw: dict[str, Any]) -> MediaInfo:
@@ -155,6 +199,7 @@ def parse(raw: dict[str, Any]) -> MediaInfo:
         duration_s=_number(fmt.get("duration")),
         width=int(_number((video or {}).get("width"))),
         height=int(_number((video or {}).get("height"))),
+        index_first=raw.get("index_first") is True,
     )
 
 
@@ -174,19 +219,12 @@ async def _ffprobe(path: str) -> dict[str, Any] | None:
     process = await _spawn([*command, path], max_file_bytes=0, stdout=asyncio.subprocess.PIPE)
     assert process.stdout is not None
     assert process.stderr is not None
-    try:
-        (stdout, too_long), (stderr, _) = await asyncio.wait_for(
-            asyncio.gather(
-                _collect(process, process.stdout, PROBE_OUTPUT_LIMIT_BYTES),
-                _collect(process, process.stderr, STDERR_LIMIT_BYTES),
-            ),
-            PROBE_TIMEOUT_S,
+    async with _reaped(process), asyncio.timeout(PROBE_TIMEOUT_S):
+        (stdout, too_long), (stderr, _) = await asyncio.gather(
+            _collect(process, process.stdout, PROBE_OUTPUT_LIMIT_BYTES),
+            _collect(process, process.stderr, STDERR_LIMIT_BYTES),
         )
         await process.wait()
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        raise
     if too_long:
         log.info("ffprobe said too much about %s; treating it as unreadable", path)
         return None
@@ -240,19 +278,14 @@ async def remux(
         stdout=asyncio.subprocess.PIPE,
     )
     try:
-        stderr = await asyncio.wait_for(
-            _pump(process, int(info.duration_s), on_progress), REMUX_TIMEOUT_S
-        )
+        # Cancelled, timed out, or the progress hook failed because whoever
+        # asked has gone: either way ffmpeg is stopped, not left running.
+        async with _reaped(process), asyncio.timeout(REMUX_TIMEOUT_S):
+            stderr = await _pump(process, int(info.duration_s), on_progress)
     except TimeoutError:
-        process.kill()
-        await process.wait()
         _discard(target)
         return False
     except BaseException:
-        # Cancelled, or the progress hook failed because whoever asked has
-        # gone. Either way ffmpeg must not be left running on its own.
-        process.kill()
-        await process.wait()
         _discard(target)
         raise
     if process.returncode != 0 or not os.path.exists(target):
@@ -386,13 +419,10 @@ async def _ffmpeg_image(*inputs: str, target: str) -> bool:
     )
     assert process.stderr is not None
     try:
-        stderr, _ = await asyncio.wait_for(
-            _collect(process, process.stderr, STDERR_LIMIT_BYTES), THUMBNAIL_TIMEOUT_S
-        )
-        await process.wait()
+        async with _reaped(process), asyncio.timeout(THUMBNAIL_TIMEOUT_S):
+            stderr, _ = await _collect(process, process.stderr, STDERR_LIMIT_BYTES)
+            await process.wait()
     except TimeoutError:
-        process.kill()
-        await process.wait()
         return False
     if process.returncode != 0 or not os.path.exists(target):
         log.info("thumbnail failed: %s", _tail(stderr))
@@ -437,6 +467,21 @@ def limited(command: list[str], max_file_bytes: int) -> list[str]:
         choom, "-n", "1000", "--",
         *command,
     ]  # fmt: skip
+
+
+@contextlib.asynccontextmanager
+async def _reaped(process: asyncio.subprocess.Process) -> AsyncIterator[None]:
+    """Kill `process` and wait for it if the block ends any way but normally:
+    a timeout, an error, or the task being cancelled. Without this, a cancelled
+    task leaves its ffmpeg running, no longer bound by any timeout."""
+    try:
+        yield
+    except BaseException:
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+        await process.wait()
+        raise
 
 
 @functools.cache

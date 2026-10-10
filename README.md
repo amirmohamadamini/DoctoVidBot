@@ -49,8 +49,11 @@ download however it is sent. So the bot probes each video with `ffprobe` and
 does the least it can:
 
 1. **Already a playable MP4** (H.264, HEVC, AV1 or MPEG-4 video, with AAC or
-   MP3 audio). It is sent straight back as a streamable video. ffmpeg isn't
-   run at all.
+   MP3 audio), with its index at the front. It is sent straight back as a
+   streamable video. ffmpeg isn't run at all. Many cameras and editors write
+   the index at the end instead, which means the whole file must arrive before
+   it plays; such an MP4 gets the quick repack in step 2, which moves the index
+   to the front.
 2. **Playable streams in the wrong container**, such as an MKV, AVI or WebM
    holding H.264. The streams are copied into an MP4 with `-c:v copy`, so
    the video isn't re-encoded and the quality stays the same. This takes
@@ -84,10 +87,12 @@ live in the `data` volume, so rebuilding the image doesn't log the bot in
 again.
 
 **Disk space.** Files are downloaded and repacked on the host's disk, and a
-video can need twice its size while it's repacked. With the default two files
-at a time, that is up to 8 GB for two 2 GB videos. The bot never fills the disk:
-it keeps a tenth of it free, and at least 1 GB, and turns files away with
-"short of disk space" rather than go below that.
+video needs a little over twice its size while it's repacked: more when its
+audio is converted, which can make a long, small video much bigger. With the
+default two files at a time, plan for about 10 GB for two 2 GB videos. The bot
+never fills the disk: it reserves room for each file before downloading it and
+again before repacking it, keeps a tenth of the disk free, and at least 1 GB,
+and turns files away with "short of disk space" rather than go below that.
 
 ### Settings
 
@@ -100,6 +105,7 @@ All settings are in `.env`. [`.env.example`](.env.example) explains each one.
 | `CACHE_CHANNEL_ID` | — | See [Cache channel](#cache-channel) |
 | `MAX_FILE_MB` | 2000 | Largest file accepted. 2000 is Telegram's limit for bots |
 | `WORKERS` | 2 | Files processed at the same time |
+| `MEDIA_PARALLEL` | 4 | ffmpeg runs the media worker allows at once. Keep it at least `WORKERS` + 2 |
 | `MAX_QUEUE` | 50 | Most files waiting before new ones are turned away |
 | `JOBS_PER_USER` | 3 | Most files one person may have queued or in progress |
 | `MENU_TIMEOUT_MINUTES` | 15 | How long an unanswered menu stays open |
@@ -145,6 +151,10 @@ admins few.
    and deletes a test message first, to check it can.
 
 Tap it again to stop using the channel. Files already there stay there.
+
+The cache remembers which channel each file is in. If you change
+`CACHE_CHANNEL_ID`, the new channel starts empty and fills up again as files
+are sent; the old one is left as it is.
 
 The cache is off by default. When it's on, `/start` tells users that finished
 files are kept.
@@ -333,6 +343,10 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy
 
 Tests run in parallel on every core, through pytest-xdist. Add `-n0` to run them
 in one process, for example under a debugger.
+
+CI also builds the Docker image and runs both containers together, as
+deployed: [tests/container_smoke.py](tests/container_smoke.py) has the worker
+probe, repack and take a thumbnail of a video across the shared volume.
 
 To run it locally, put a `.env` in the project root and run `uv run doctovid`.
 ffmpeg then runs in-process. To try the two-process setup without Docker, run

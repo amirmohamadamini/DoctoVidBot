@@ -35,6 +35,29 @@
 
 ### Fixed
 
+- **MP4s with their index at the end are made streamable.** Many cameras write
+  the index last, which means the whole file must download before it plays.
+  Such files used to be sent back as they were; now they get a quick repack
+  that moves the index to the front.
+- **Cancelling a job stops ffmpeg.** Cancelling during a probe or a thumbnail
+  left ffmpeg running, and the media worker didn't notice the bot hang up
+  unless it was repacking. Both are stopped now, and stopping the worker stops
+  everything it was running.
+- Cache entries remember their channel. Changing `CACHE_CHANNEL_ID` used to
+  make old entries point at unrelated messages in the new channel.
+- After a restart, buttons on menus from before do nothing. Request numbers
+  start again at 1, so an old button could act on a new file.
+- Two quick taps on a menu queue the file once, and files sent together can't
+  open more than five menus.
+- Two backups at once, such as the schedule and **💾 Backup now**, no longer
+  delete each other's file. Compressing a backup no longer holds up the bot.
+- A file served from the cache is counted against limits even if the job is
+  cancelled straight after.
+- The disk reservation for a repack now includes audio that gets converted,
+  which can make a file much bigger than the download.
+- An operation waiting for a free slot in the media worker no longer times out
+  as though the worker were broken. `MEDIA_PARALLEL` sets the number of slots.
+- An older broadcast confirm button can't send a newer draft.
 - "1 files" and "1 people": counts now agree with their nouns.
 
 ## 2.0.0

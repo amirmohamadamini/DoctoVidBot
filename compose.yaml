@@ -47,12 +47,15 @@ services:
     user: media
     # No network at all: it talks to the bot over a socket on the volume.
     network_mode: none
-    # Deliberately no env_file: it never sees BOT_TOKEN or API_HASH.
-    environment: *shared
+    # Deliberately no env_file: it never sees BOT_TOKEN or API_HASH. Only
+    # MEDIA_PARALLEL is taken from .env.
+    environment:
+      <<: *shared
+      MEDIA_PARALLEL: ${MEDIA_PARALLEL:-4}
     volumes:
       - scratch:/scratch
     # Each ffmpeg is also capped at 1 GB, and is the first thing killed if
-    # memory runs out. Raise these if you raise WORKERS.
+    # memory runs out. Raise these if you raise WORKERS or MEDIA_PARALLEL.
     mem_limit: 2g
     cpus: 2
     pids_limit: 128

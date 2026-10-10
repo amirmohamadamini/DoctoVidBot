@@ -21,6 +21,7 @@ ALERTS = {
     "join.prompt": {},
     "join.not_yet": {},
     "join.check_failed": {},
+    "menu.busy": {},
     "admin.cache_off": {},
     "admin.cache_unset": {},
     "admin.join_unset": {},

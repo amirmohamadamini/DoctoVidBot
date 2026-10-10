@@ -172,9 +172,9 @@ async def test_broadcast_asks_for_the_message_then_confirms(
     with pytest.raises(events.StopPropagation):
         await admin._admins_only(admin._on_draft)(draft)
     assert [bare(text) for text in draft.said] == ["Send this message to 3 people?"]
-    assert draft.buttons[0][0].type.data == b"adm:send"
+    assert draft.buttons[0][0].type.data == b"adm:send:55"
 
-    confirm = await tap(admin, "adm:send")
+    confirm = await tap(admin, "adm:send:55")
     for task in list(admin._tasks):
         await task
     assert client.copied == [1, 2, 3]
@@ -183,25 +183,52 @@ async def test_broadcast_asks_for_the_message_then_confirms(
     )
 
 
+async def draft(admin: Admin, message_id: int) -> Chat:
+    await tap(admin, "adm:cast")
+    event = Chat(7, text="news", message_id=message_id)
+    with pytest.raises(events.StopPropagation):
+        await admin._admins_only(admin._on_draft)(event)
+    return event
+
+
+async def finish(admin: Admin) -> None:
+    for task in list(admin._tasks):
+        await task
+
+
 async def test_only_the_drafted_message_can_be_broadcast(
     admin: Admin, store: Store, client: FakeClient
 ) -> None:
     store.seen(1)
-    # A forged confirm, with no draft, or naming some other message.
+    # Forged confirms: with no draft at all, and naming some other message.
     await tap(admin, "adm:send:12")
     await tap(admin, "adm:send")
     assert client.copied == []
 
-    await tap(admin, "adm:cast")
-    with pytest.raises(events.StopPropagation):
-        await admin._admins_only(admin._on_draft)(Chat(7, text="news", message_id=55))
-    await tap(admin, "adm:send")
-    for task in list(admin._tasks):
-        await task
+    await draft(admin, 55)
+    await tap(admin, "adm:send:12")
+    assert client.copied == []
+    await tap(admin, "adm:send:55")
+    await finish(admin)
     assert client.copied == [1]
 
     # Sending it once used the draft up.
-    await tap(admin, "adm:send")
+    await tap(admin, "adm:send:55")
+    assert client.copied == [1]
+
+
+async def test_an_older_confirm_cannot_send_a_newer_draft(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.seen(1)
+    await draft(admin, 55)
+    await draft(admin, 56)
+    stale = await tap(admin, "adm:send:55")
+    assert "replaced" in bare(stale.edited[-1])
+    assert client.copied == []
+
+    await tap(admin, "adm:send:56")
+    await finish(admin)
     assert client.copied == [1]
 
 

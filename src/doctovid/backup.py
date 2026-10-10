@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import tempfile
 import time
 import zipfile
@@ -24,15 +25,29 @@ CHECK_EVERY_S = 60.0
 DATABASE_NAME = "doctovid.db"
 
 
-def make_backup(store: Store, directory: Path, when: datetime) -> Path:
-    """A zip holding a consistent copy of the database."""
-    archive = directory / f"doctovid-backup-{when:%Y-%m-%d-%H%M}.zip"
-    with tempfile.TemporaryDirectory(dir=directory) as scratch:
-        snapshot = Path(scratch) / DATABASE_NAME
+async def make_backup(store: Store, directory: Path, when: datetime) -> Path:
+    """A zip holding a consistent copy of the database, in a folder of its own
+    under `directory`, so two backups never share a file. The caller removes
+    the folder."""
+    folder = Path(tempfile.mkdtemp(dir=directory, prefix="backup-"))
+    try:
+        snapshot = folder / DATABASE_NAME
+        # The copy is taken on the bot's own connection, which SQLite ties to
+        # this thread; it's quick. Compressing it isn't, so that runs in a
+        # thread of its own, and the bot keeps answering meanwhile.
         store.snapshot(snapshot)
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zipped:
-            zipped.write(snapshot, DATABASE_NAME)
+        archive = folder / f"doctovid-backup-{when:%Y-%m-%d-%H%M}.zip"
+        await asyncio.to_thread(_compress, snapshot, archive)
+        snapshot.unlink()
+    except BaseException:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
     return archive
+
+
+def _compress(snapshot: Path, archive: Path) -> None:
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zipped:
+        zipped.write(snapshot, DATABASE_NAME)
 
 
 class Backups:
@@ -59,6 +74,9 @@ class Backups:
         self._now = now
         self._calendar_now = calendar_now
         self._locale_for = locale_for
+        #: One backup at a time: the schedule and a tap on "Backup now" can
+        #: coincide, and so can two taps.
+        self._sending = asyncio.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -96,11 +114,15 @@ class Backups:
 
     async def send(self) -> int:
         """Send a backup to every admin. Returns how many received it."""
+        async with self._sending:
+            return await self._send()
+
+    async def _send(self) -> int:
         # Recorded first: a backup that fails for every admin must not be
         # retried every minute until it succeeds.
         self._store.set_setting("last_backup", str(self._now()))
         self._directory.mkdir(parents=True, exist_ok=True)
-        archive = make_backup(self._store, self._directory, self._calendar_now())
+        archive = await make_backup(self._store, self._directory, self._calendar_now())
         users, active = self._store.user_counts()
         delivered = 0
         try:
@@ -118,7 +140,7 @@ class Backups:
                     # Telegram requires before a bot may message them.
                     log.warning("could not send the backup to admin %s", admin, exc_info=True)
         finally:
-            archive.unlink(missing_ok=True)
+            shutil.rmtree(archive.parent, ignore_errors=True)
         if delivered:
             self._store.set_setting("last_backup_delivered", str(self._now()))
         else:

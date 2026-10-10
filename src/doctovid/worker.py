@@ -10,9 +10,10 @@ request, a JSON line such as
 
     {"op": "remux", "source": "/scratch/jobs/…/source", "target": "…/playable.mp4"}
 
-answered by `{"progress": [done, total]}` lines, for a remux, and then
-`{"ok": true, "result": …}` or `{"ok": false, "error": "…"}`. If the bot hangs
-up mid-request, which is what cancelling a job does, the work is stopped.
+answered by `{"started": true}` once a slot is free, `{"progress": [done,
+total]}` lines for a remux, and then `{"ok": true, "result": …}` or
+`{"ok": false, "error": "…"}`. If the bot hangs up mid-request, which is what
+cancelling a job does, the work is stopped.
 
 It accepts paths only inside the scratch directory. The bot doesn't trust what
 comes back either: see `safefile.py`.
@@ -54,19 +55,28 @@ class Worker:
     def __init__(self, scratch: Path, *, parallel: int = DEFAULT_PARALLEL) -> None:
         self._root = os.path.realpath(scratch)
         self._slots = asyncio.Semaphore(parallel)
+        self._active: set[asyncio.Task[Any]] = set()
+
+    async def stop(self) -> None:
+        """Stop every request still running, ffmpeg included."""
+        for task in self._active:
+            task.cancel()
+        await asyncio.gather(*self._active, return_exceptions=True)
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         async def send(message: dict[str, Any]) -> None:
             writer.write(json.dumps(message).encode() + b"\n")
             await writer.drain()
 
+        task = asyncio.current_task()
+        assert task is not None
+        self._active.add(task)
         try:
             line = await asyncio.wait_for(reader.readline(), REQUEST_TIMEOUT_S)
             request = json.loads(line)
             if not isinstance(request, dict):
                 raise BadRequest("not a JSON object")
-            async with self._slots:
-                result = await self._run(request, send)
+            result = await self._until_hangup(reader, self._queued(request, send))
             await send({"ok": True, "result": result})
         except (BadRequest, ValueError, KeyError, TypeError) as exc:
             log.warning("refused a request: %s", exc)
@@ -79,9 +89,38 @@ class Worker:
             with contextlib.suppress(OSError):
                 await send({"ok": False, "error": "internal error"})
         finally:
+            self._active.discard(task)
             writer.close()
             with contextlib.suppress(OSError):
                 await writer.wait_closed()
+
+    async def _queued(self, request: dict[str, Any], send: Send) -> Any:
+        async with self._slots:
+            # The bot's time limit for the operation starts now, not while it
+            # waited here behind other files.
+            await send({"started": True})
+            return await self._run(request, send)
+
+    async def _until_hangup(self, reader: asyncio.StreamReader, work: Awaitable[Any]) -> Any:
+        """Run `work`, and stop it if the bot hangs up first, whether it is
+        still waiting for a slot or already running ffmpeg.
+
+        Hanging up is how the bot cancels a job. It sends nothing after its
+        request, so anything arriving on the connection means it has closed.
+        """
+        job = asyncio.ensure_future(work)
+        hangup = asyncio.ensure_future(reader.read(1))
+        try:
+            await asyncio.wait({job, hangup}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            if not job.done():
+                job.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await job
+            hangup.cancel()
+        if job.cancelled():
+            raise ConnectionResetError("the bot hung up")
+        return job.result()
 
     async def _run(self, request: dict[str, Any], send: Send) -> Any:
         match request.get("op"):
@@ -143,6 +182,7 @@ async def serve(
     async with server:
         with contextlib.suppress(asyncio.CancelledError):
             await server.serve_forever()
+        await worker.stop()
 
 
 def main() -> None:

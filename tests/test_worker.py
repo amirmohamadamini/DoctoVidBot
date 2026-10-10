@@ -14,15 +14,16 @@ import shutil
 import tempfile
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from doctovid import media
+from doctovid import media, tools
 from doctovid.config import load
 from doctovid.runner import Runner
 from doctovid.store import Store
 from doctovid.tools import LocalTools, RemoteTools, WorkerUnavailable
-from doctovid.worker import serve
+from doctovid.worker import Worker, serve
 
 from .conftest import FakeTransport, MakeClip, make_job, make_request, needs_ffmpeg
 
@@ -187,3 +188,127 @@ async def test_a_whole_job_through_the_worker(
     assert upload.video is not None
     assert upload.thumbnail
     assert list(scratch.iterdir()) == []
+
+
+class NullWriter:
+    def write(self, data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    async def wait_closed(self) -> None:
+        pass
+
+
+async def test_hanging_up_stops_the_operation(tmp_path: Path) -> None:
+    worker = Worker(tmp_path)
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def run(request: Any, send: Any) -> bool:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+        return True
+
+    worker._run = run  # type: ignore[method-assign]
+    reader = asyncio.StreamReader()
+    reader.feed_data(b'{"op": "probe"}\n')
+    handler = asyncio.create_task(worker.handle(reader, NullWriter()))  # type: ignore[arg-type]
+    await started.wait()
+
+    reader.feed_eof()
+    await asyncio.wait_for(handler, 2)
+    assert stopped.is_set()
+
+
+async def test_hanging_up_while_waiting_for_a_slot_gives_up_the_wait(tmp_path: Path) -> None:
+    worker = Worker(tmp_path, parallel=1)
+    ran: list[str] = []
+
+    async def run(request: Any, send: Any) -> bool:
+        ran.append(request["op"])
+        return True
+
+    worker._run = run  # type: ignore[method-assign]
+    async with worker._slots:  # every slot busy
+        reader = asyncio.StreamReader()
+        reader.feed_data(b'{"op": "probe"}\n')
+        handler = asyncio.create_task(worker.handle(reader, NullWriter()))  # type: ignore[arg-type]
+        await asyncio.sleep(0.01)
+        reader.feed_eof()
+        await asyncio.wait_for(handler, 2)
+    assert ran == []
+
+
+async def test_stopping_the_worker_stops_its_requests(tmp_path: Path) -> None:
+    worker = Worker(tmp_path)
+    started = asyncio.Event()
+
+    async def run(request: Any, send: Any) -> bool:
+        started.set()
+        await asyncio.Event().wait()
+        return True
+
+    worker._run = run  # type: ignore[method-assign]
+    reader = asyncio.StreamReader()
+    reader.feed_data(b'{"op": "probe"}\n')
+    handler = asyncio.create_task(worker.handle(reader, NullWriter()))  # type: ignore[arg-type]
+    await started.wait()
+    await asyncio.wait_for(worker.stop(), 2)
+    assert handler.done()
+
+
+async def test_waiting_for_a_slot_doesnt_count_against_the_time_limit(
+    socket_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(tools.TIMEOUTS_S, "probe", 0.3)
+    worker = Worker(tmp_path, parallel=1)
+
+    async def run(request: Any, send: Any) -> None:
+        return None
+
+    worker._run = run  # type: ignore[method-assign]
+    server = await asyncio.start_unix_server(worker.handle, path=str(socket_path))
+    async with server:
+        async with worker._slots:  # busy for longer than a probe may take
+            probe = asyncio.create_task(RemoteTools(socket_path).probe(tmp_path / "source"))
+            await asyncio.sleep(0.6)
+        assert await probe is None
+
+
+async def test_a_worker_that_never_gets_round_to_it_gives_up(
+    socket_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tools, "QUEUE_WAIT_S", 0.2)
+    worker = Worker(tmp_path, parallel=1)
+    server = await asyncio.start_unix_server(worker.handle, path=str(socket_path))
+    async with server, worker._slots:
+        with pytest.raises(WorkerUnavailable):
+            await RemoteTools(socket_path).probe(tmp_path / "source")
+
+
+async def test_a_worker_cannot_keep_putting_the_deadline_off(
+    socket_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setitem(tools.TIMEOUTS_S, "probe", 0.05)
+
+    async def stalling(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await reader.readline()
+        for _ in range(10):
+            writer.write(b'{"started": true}\n')
+            await writer.drain()
+            await asyncio.sleep(0.02)
+        writer.write(b'{"ok": true, "result": null}\n')
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_unix_server(stalling, path=str(socket_path))
+    async with server:
+        with pytest.raises(WorkerUnavailable):
+            await RemoteTools(socket_path).probe(Path("/scratch/source"))

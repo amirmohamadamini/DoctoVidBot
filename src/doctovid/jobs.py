@@ -40,6 +40,10 @@ class Request:
     menu_message_id: int = 0
     new_name: str | None = None
     thumbnail: str | None = None
+    #: A new name or thumbnail is being applied, which takes a few round trips
+    #: to Telegram. Meanwhile the menu can only be cancelled, so it can't be
+    #: sent on its way half-changed.
+    updating: bool = False
 
     @property
     def output_name(self) -> str:
@@ -56,14 +60,17 @@ class Job:
     request: Request
     mode: Mode
     task: asyncio.Task[None] | None = field(default=None, repr=False)
+    #: The message that shows the job's progress: its menu, as it was when the
+    #: job was queued. Fixed then, so nothing done to the menu later can take
+    #: the job's status and its cancel button somewhere else.
+    status_message_id: int = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.status_message_id = self.request.menu_message_id
 
     @property
     def user_id(self) -> int:
         return self.request.user_id
-
-    @property
-    def status_message_id(self) -> int:
-        return self.request.menu_message_id
 
 
 class QueueFull(Exception):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -21,7 +22,11 @@ def probed(format_name: str, video: str | None, *audio: str) -> dict[str, Any]:
     if video is not None:
         streams.append({"codec_type": "video", "codec_name": video, "width": 640, "height": 360})
     streams += [{"codec_type": "audio", "codec_name": codec} for codec in audio]
-    return {"format": {"format_name": format_name, "duration": "12.5"}, "streams": streams}
+    return {
+        "format": {"format_name": format_name, "duration": "12.5"},
+        "streams": streams,
+        "index_first": True,
+    }
 
 
 MP4 = "mov,mp4,m4a,3gp,3g2,mj2"
@@ -32,6 +37,7 @@ MP4 = "mov,mp4,m4a,3gp,3g2,mj2"
     [
         (probed(MP4, "h264", "aac"), Plan.READY),
         (probed(MP4, "hevc"), Plan.READY),
+        ({**probed(MP4, "h264", "aac"), "index_first": False}, Plan.REMUX),
         (probed(MP4, "h264", "ac3"), Plan.REMUX),
         (probed("matroska,webm", "h264", "aac"), Plan.REMUX),
         (probed("matroska,webm", "h264", "dts", "ac3"), Plan.REMUX),
@@ -98,9 +104,44 @@ async def test_an_mkv_is_remuxed_into_a_playable_mp4(make_clip: MakeClip, tmp_pa
 
 @needs_ffmpeg
 async def test_a_playable_mp4_needs_nothing(make_clip: MakeClip) -> None:
-    info = await media.probe(str(make_clip("ready.mp4", video="mpeg4", audio="aac")))
+    clip = make_clip("ready.mp4", video="mpeg4", audio="aac", faststart=True)
+    info = await media.probe(str(clip))
     assert info is not None
     assert info.plan is Plan.READY
+
+
+@needs_ffmpeg
+async def test_an_mp4_indexed_last_is_repacked(make_clip: MakeClip) -> None:
+    clip = make_clip("camera.mp4", video="mpeg4", audio="aac")
+    assert clip.read_bytes().index(b"moov") > clip.read_bytes().index(b"mdat")
+    info = await media.probe(str(clip))
+    assert info is not None
+    assert not info.index_first
+    assert info.plan is Plan.REMUX
+
+
+def box(kind: bytes, body: bytes = b"") -> bytes:
+    return (8 + len(body)).to_bytes(4) + kind + body
+
+
+@pytest.mark.parametrize(
+    ("data", "first"),
+    [
+        (box(b"ftyp", b"isom") + box(b"moov") + box(b"mdat", b"x" * 100), True),
+        (box(b"ftyp", b"isom") + box(b"free") + box(b"mdat", b"x" * 100) + box(b"moov"), False),
+        (box(b"ftyp") + box(b"moov") + box(b"moof") + box(b"mdat"), True),
+        (box(b"ftyp") + box(b"moof") + box(b"mdat"), False),
+        # A 64-bit size, then the index.
+        ((1).to_bytes(4) + b"wide" + (24).to_bytes(8) + b"x" * 8 + box(b"moov"), True),
+        (box(b"ftyp")[:5], False),
+        ((0).to_bytes(4) + b"mdat" + b"x" * 50, False),
+        ((3).to_bytes(4) + b"junk" + box(b"moov"), False),
+    ],
+)
+def test_where_the_index_is(tmp_path: Path, data: bytes, first: bool) -> None:
+    path = tmp_path / "video.mp4"
+    path.write_bytes(data)
+    assert media.index_first(str(path)) is first
 
 
 @needs_ffmpeg
@@ -252,3 +293,34 @@ async def test_every_supported_container_still_opens(make_clip: MakeClip, name: 
     video = "libvpx" if name.endswith(".webm") else "mpeg4"
     audio = "libvorbis" if name.endswith(".webm") else "aac"
     assert await media.probe(str(make_clip(name, video=video, audio=audio))) is not None
+
+
+@pytest.mark.parametrize("operation", ["probe", "image"])
+async def test_a_cancelled_task_kills_its_process(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    children: list[asyncio.subprocess.Process] = []
+    spawned = asyncio.Event()
+
+    async def spawn(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        child = await asyncio.create_subprocess_exec(
+            "sleep", "30", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        children.append(child)
+        spawned.set()
+        return child
+
+    monkeypatch.setattr(media, "_spawn", spawn)
+    work = (
+        media.run_ffprobe("/nothing")
+        if operation == "probe"
+        else media._ffmpeg_image("-i", "/nothing", target="/nothing.jpg")
+    )
+    task = asyncio.create_task(work)
+    await spawned.wait()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    [child] = children
+    assert child.returncode is not None

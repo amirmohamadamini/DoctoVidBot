@@ -15,9 +15,11 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS cache (
-    key        TEXT PRIMARY KEY,
+    channel    INTEGER NOT NULL,
+    key        TEXT    NOT NULL,
     message_id INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (channel, key)
 );
 CREATE TABLE IF NOT EXISTS users (
     user_id    INTEGER PRIMARY KEY,
@@ -47,6 +49,13 @@ class Store:
         columns = {row[1] for row in self._db.execute("PRAGMA table_info(users)")}
         if "language" not in columns:
             self._db.execute("ALTER TABLE users ADD COLUMN language TEXT")
+        # A message id means nothing without its channel, and entries from
+        # before the channel was stored can't say which one they meant. They
+        # are dropped: the files are made again the next time they're asked for.
+        columns = {row[1] for row in self._db.execute("PRAGMA table_info(cache)")}
+        if "channel" not in columns:
+            self._db.execute("DROP TABLE cache")
+            self._db.executescript(_SCHEMA)
 
     def close(self) -> None:
         self._db.close()
@@ -79,23 +88,30 @@ class Store:
 
     # ------------------------------------------------------------ cache
 
-    def cached(self, key: str) -> int | None:
-        row = self._db.execute("SELECT message_id FROM cache WHERE key = ?", (key,)).fetchone()
+    # Every entry belongs to a channel: message ids are only unique within one,
+    # so an id read against another channel would be some unrelated message.
+
+    def cached(self, channel: int, key: str) -> int | None:
+        row = self._db.execute(
+            "SELECT message_id FROM cache WHERE channel = ? AND key = ?", (channel, key)
+        ).fetchone()
         return None if row is None else int(row[0])
 
-    def remember(self, key: str, message_id: int) -> None:
+    def remember(self, channel: int, key: str, message_id: int) -> None:
         self._db.execute(
-            "INSERT INTO cache (key, message_id, created_at) VALUES (?, ?, ?) "
-            "ON CONFLICT (key) DO UPDATE SET message_id = excluded.message_id, "
+            "INSERT INTO cache (channel, key, message_id, created_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT (channel, key) DO UPDATE SET message_id = excluded.message_id, "
             "created_at = excluded.created_at",
-            (key, message_id, int(time.time())),
+            (channel, key, message_id, int(time.time())),
         )
 
-    def forget(self, key: str) -> None:
-        self._db.execute("DELETE FROM cache WHERE key = ?", (key,))
+    def forget(self, channel: int, key: str) -> None:
+        self._db.execute("DELETE FROM cache WHERE channel = ? AND key = ?", (channel, key))
 
-    def cache_size(self) -> int:
-        row = self._db.execute("SELECT COUNT(*) FROM cache").fetchone()
+    def cache_size(self, channel: int | None) -> int:
+        row = self._db.execute(
+            "SELECT COUNT(*) FROM cache WHERE channel = ?", (channel,)
+        ).fetchone()
         return int(row[0])
 
     # ------------------------------------------------------------ usage

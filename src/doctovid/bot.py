@@ -103,6 +103,9 @@ class Bot:
             on_position=self._show_position,
         )
         self._requests: dict[int, Request] = {}
+        #: Menus being sent right now, per user: counted with the open ones,
+        #: so files arriving together can't all pass the limit at once.
+        self._opening: dict[int, int] = {}
         self._prompts: dict[int, Prompt] = {}
         self._request_ids = itertools.count(1)
         self._background: list[asyncio.Task[None]] = []
@@ -382,7 +385,8 @@ class Bot:
         if reason := self._over_limit(user_id, size):
             await event.reply(t.text("file.over_limit", reason=reason))
             return
-        if sum(1 for r in self._requests.values() if r.user_id == user_id) >= MAX_OPEN_MENUS:
+        open_menus = sum(1 for r in self._requests.values() if r.user_id == user_id)
+        if open_menus + self._opening.get(user_id, 0) >= MAX_OPEN_MENUS:
             await event.reply(t.text("file.too_many_open"))
             return
 
@@ -399,7 +403,13 @@ class Bot:
             expires_at=self._now() + self._config.menu_timeout_s,
         )
         text, keyboard = menus.request_menu(request, t)
-        menu = await event.reply(text, buttons=to_buttons(keyboard))
+        self._opening[user_id] = self._opening.get(user_id, 0) + 1
+        try:
+            menu = await event.reply(text, buttons=to_buttons(keyboard))
+        finally:
+            self._opening[user_id] -= 1
+            if not self._opening[user_id]:
+                del self._opening[user_id]
         request.menu_message_id = menu.id
         self._requests[request.id] = request
 
@@ -419,19 +429,34 @@ class Bot:
     async def _take_name(self, event: Any, prompt: Prompt) -> None:
         del self._prompts[event.sender_id]
         request = self._requests.get(prompt.request_id)
-        await self._delete(event.sender_id, prompt.message_id)
         if request is None:
+            await self._delete(event.sender_id, prompt.message_id)
             return
-        renamed = apply_rename(request.file_name, event.message.raw_text)
-        request.new_name = None if renamed == request.file_name else renamed
-        await self._resend_menu(request)
+        request.updating = True
+        try:
+            await self._delete(event.sender_id, prompt.message_id)
+            if self._requests.get(request.id) is not request:
+                return  # cancelled or expired meanwhile
+            renamed = apply_rename(request.file_name, event.message.raw_text)
+            request.new_name = None if renamed == request.file_name else renamed
+            await self._resend_menu(request)
+        finally:
+            request.updating = False
 
     async def _take_thumbnail(self, event: Any, prompt: Prompt) -> None:
         del self._prompts[event.sender_id]
         request = self._requests.get(prompt.request_id)
-        await self._delete(event.sender_id, prompt.message_id)
         if request is None:
+            await self._delete(event.sender_id, prompt.message_id)
             return
+        request.updating = True
+        try:
+            await self._apply_thumbnail(event, prompt, request)
+        finally:
+            request.updating = False
+
+    async def _apply_thumbnail(self, event: Any, prompt: Prompt, request: Request) -> None:
+        await self._delete(event.sender_id, prompt.message_id)
         t = self.locale_for(event.sender_id)
         button = t.word("menu.add_thumbnail")
         size = event.message.file.size or 0
@@ -448,8 +473,8 @@ class Bot:
         if fitted is None:
             await event.reply(t.text("thumbnail.unusable", button=button))
             return
-        if request.id not in self._requests:
-            # Sent on its way, or cancelled, while the picture was downloading.
+        if self._requests.get(request.id) is not request:
+            # Cancelled or expired while the picture was downloading.
             fitted.unlink(missing_ok=True)
             return
         request.thumbnail = str(fitted)
@@ -518,8 +543,18 @@ class Bot:
 
         t = self.locale_for(event.sender_id)
         request = self._requests.get(target)
-        if request is None or request.user_id != event.sender_id:
+        # Request numbers start again at 1 when the bot restarts, but menus
+        # from before stay in the chat: a button counts only on the menu it
+        # was drawn on. Telegram never reuses a message id within a chat.
+        if (
+            request is None
+            or request.user_id != event.sender_id
+            or event.message_id != request.menu_message_id
+        ):
             await event.answer(t.alert("menu.expired_alert"), alert=True)
+            return
+        if request.updating and action != "drop":
+            await event.answer(t.alert("menu.busy"), alert=True)
             return
 
         match action:
@@ -556,22 +591,38 @@ class Bot:
         if not allowed:
             await event.answer(t.alert("join.prompt"), alert=True)
             return
+        # The check above waited on Telegram, and anything may have happened
+        # to the menu meanwhile: a second tap, cancelling, a new name or
+        # thumbnail started or finished. So it's all checked again here, with
+        # nothing awaited until the request is taken: whichever tap gets here
+        # first takes it, and it goes back if the job can't be queued.
+        if (
+            self._requests.get(request.id) is not request
+            or event.message_id != request.menu_message_id
+        ):
+            await event.answer(t.alert("menu.expired_alert"), alert=True)
+            return
+        if request.updating:
+            await event.answer(t.alert("menu.busy"), alert=True)
+            return
+        del self._requests[request.id]
         # Also again: other files may have been sent since this menu opened.
         if reason := self._over_limit(request.user_id, request.size):
+            self._requests[request.id] = request
             await event.answer(plain(t.lines(reason)), alert=True)
             return
         job = Job(id=self._queue.next_id(), request=request, mode=mode)
         try:
             position = await self._queue.submit(job)
-        except UserLimit:
-            limit = self._config.jobs_per_user
-            await event.answer(t.alert("queue.per_user", count=limit), alert=True)
-            return
-        except QueueFull:
-            await event.answer(t.alert("queue.full"), alert=True)
+        except (UserLimit, QueueFull) as exc:
+            self._requests[request.id] = request
+            if isinstance(exc, UserLimit):
+                limit = self._config.jobs_per_user
+                await event.answer(t.alert("queue.per_user", count=limit), alert=True)
+            else:
+                await event.answer(t.alert("queue.full"), alert=True)
             return
         # The request now belongs to the job, which cleans up its thumbnail.
-        self._requests.pop(request.id, None)
         self._drop_prompt_for(request)
         # Replace the menu before anything else awaits, so the runner's first
         # status lands after this one rather than being overwritten by it.
@@ -594,7 +645,11 @@ class Bot:
     async def _stop_job(self, event: Any, job_id: int) -> None:
         t = self.locale_for(event.sender_id)
         job = self._queue.find(job_id)
-        if job is None or job.user_id != event.sender_id:
+        if (
+            job is None
+            or job.user_id != event.sender_id
+            or event.message_id != job.status_message_id
+        ):
             await event.answer(t.alert("queue.finished"))
             return
         self._queue.cancel(job_id)
@@ -635,12 +690,21 @@ class Bot:
         await self._edit(request.user_id, request.menu_message_id, text, keyboard)
 
     async def _resend_menu(self, request: Request) -> None:
-        """A fresh menu at the bottom of the chat, where the user is looking."""
+        """A fresh menu at the bottom of the chat, where the user is looking.
+
+        Each step waits on Telegram, and the menu may be cancelled meanwhile:
+        a menu that is no longer open isn't sent, or is taken back.
+        """
         await self._delete(request.user_id, request.menu_message_id)
+        if self._requests.get(request.id) is not request:
+            return
         text, keyboard = menus.request_menu(request, self.locale_for(request.user_id))
         menu = await self._client.send_message(
             request.user_id, text, buttons=to_buttons(keyboard), reply_to=request.message_id
         )
+        if self._requests.get(request.id) is not request:
+            await self._delete(request.user_id, menu.id)
+            return
         request.menu_message_id = menu.id
 
     def _close(self, request: Request) -> None:

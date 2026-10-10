@@ -66,11 +66,6 @@ def cancel_button(job_id: int, t: Locale) -> Keyboard:
     return [[Key(t.label("menu.cancel"), f"stop:{job_id}", DANGER)]]
 
 
-def space_needed(job: Job) -> int:
-    """A remux writes its MP4 next to the download, so a video may need two copies."""
-    return job.request.size * (2 if job.mode is Mode.VIDEO else 1)
-
-
 def usable_disk(path: Path) -> int:
     """Free space jobs may use: what is free, less the margin."""
     usage = shutil.disk_usage(path)
@@ -114,10 +109,13 @@ class Runner:
         self._telegram = transport
         self._now = now
         self._usable_bytes = usable_bytes
-        #: Bytes promised to jobs already running. Their files are still
-        #: growing, so free space alone would let every worker start a large
-        #: download at once and all of them run out of room halfway.
+        #: Bytes promised to jobs already running and not yet written, in total
+        #: and per job. Their files are still growing, so free space alone
+        #: would let every worker start a large download at once and all of
+        #: them run out of room halfway. Bytes already on disk show in the free
+        #: space instead, so they are taken off as they are written.
         self._reserved = 0
+        self._held: dict[int, int] = {}
 
     async def __call__(self, job: Job) -> None:
         workdir = job_directory(self._config.work_dir, job.id)
@@ -151,22 +149,38 @@ class Runner:
     async def _run(self, job: Job, workdir: Path) -> None:
         key = cache_key(job)
         if key is not None and await self._from_cache(job, key):
-            self._count(job)
             return
 
-        needed = space_needed(job)
-        if self._usable_bytes(workdir) - self._reserved < needed:
-            raise JobFailed("job.disk")
-        self._reserved += needed
+        self._held[job.id] = 0
         try:
+            self._reserve(job, workdir, job.request.size)
             message_id = await self._process(job, workdir)
         finally:
-            self._reserved -= needed
+            self._reserved -= self._held.pop(job.id)
         self._count(job)
 
         await self._finish(job)
         if key is not None:
             await self._to_cache(job, key, message_id)
+
+    def _reserve(self, job: Job, workdir: Path, size: int) -> None:
+        """Promise `size` more bytes of disk to `job`, or refuse the job.
+
+        The download is reserved first. A remux's output is reserved once the
+        file has been probed, by the same estimate that caps what ffmpeg may
+        write: converted audio can make it much bigger than the download.
+        """
+        if self._usable_bytes(workdir) - self._reserved < size:
+            raise JobFailed("job.disk")
+        self._reserved += size
+        self._held[job.id] += size
+
+    def _written(self, job: Job, size: int) -> None:
+        """`size` bytes promised to `job` are on disk now, where the free space
+        counts them: they are no longer owed."""
+        size = min(size, self._held[job.id])
+        self._reserved -= size
+        self._held[job.id] -= size
 
     # ------------------------------------------------------------ stages
 
@@ -186,7 +200,15 @@ class Runner:
     async def _download(self, job: Job, dest: str) -> None:
         name = job.request.file_name
         await self._status(job, self._t(job).text("job.downloading", name=name), cancellable=True)
-        report = self._transfer_bar(job, "progress.downloading", name)
+        bar = self._transfer_bar(job, "progress.downloading", name)
+        arrived = 0
+
+        async def report(done: int, total: int) -> None:
+            nonlocal arrived
+            self._written(job, max(0, done - arrived))
+            arrived = max(arrived, done)
+            await bar(done, total)
+
         try:
             found = await self._telegram.download(
                 job.user_id,
@@ -201,6 +223,7 @@ class Runner:
             raise JobFailed("job.changed") from None
         if not found:
             raise JobFailed("job.gone")
+        self._written(job, job.request.size - arrived)
 
     async def _send_video(self, job: Job, source: Path, workdir: Path) -> int:
         self._tools.share_file(source)
@@ -214,10 +237,12 @@ class Runner:
                 codec = info.video_codec or self._t(job).phrase("job.unknown_codec")
                 raise JobFailed("job.unsupported", codec=codec)
             case media.Plan.REMUX:
+                self._reserve(job, workdir, media.remux_bound(job.request.size, info))
                 target = workdir / PLAYABLE_FILE
                 report = self._remux_bar(job, name)
                 if not await self._tools.remux(source, target, info, report):
                     raise JobFailed("job.repack_failed")
+                self._written(job, target.stat().st_size)
                 source = target
                 name = with_extension(name, ".mp4")
             case media.Plan.READY:
@@ -300,7 +325,7 @@ class Runner:
 
     async def _from_cache(self, job: Job, key: str) -> bool:
         channel = self._cache_channel()
-        message_id = self._store.cached(key)
+        message_id = None if channel is None else self._store.cached(channel, key)
         if channel is None or message_id is None:
             return False
         try:
@@ -313,9 +338,12 @@ class Runner:
             log.warning("cache copy failed for %s", key, exc_info=True)
             return False
         if sent is None:
-            self._store.forget(key)
+            self._store.forget(channel, key)
             return False
         log.info("job %s served from cache", job.id)
+        # Counted the moment it's delivered, before the tidying up that
+        # follows: a cancel arriving during that must not make it free.
+        self._count(job)
         await self._finish(job)
         return True
 
@@ -330,7 +358,7 @@ class Runner:
             log.warning("could not store job %s in the cache channel", job.id, exc_info=True)
             return
         if stored is not None:
-            self._store.remember(key, stored)
+            self._store.remember(channel, key, stored)
 
     # ------------------------------------------------------------ progress
 

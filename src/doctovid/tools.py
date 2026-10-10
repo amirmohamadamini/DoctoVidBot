@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -33,14 +34,19 @@ LINE_LIMIT = 2 * media.PROBE_OUTPUT_LIMIT_BYTES
 #: example just after both containers start.
 CONNECT_WAIT_S = 20.0
 
-#: Each operation's own time limit, plus a margin: the worker enforces the
-#: limit, this is only for a worker that has stopped answering altogether.
+#: Each operation's own time limit, plus a margin, counted from when the worker
+#: starts it: the worker enforces the limit, this is only for a worker that has
+#: stopped answering altogether.
 TIMEOUTS_S = {
     "probe": media.PROBE_TIMEOUT_S + 15,
     "remux": media.REMUX_TIMEOUT_S + 60,
     "frame": media.THUMBNAIL_TIMEOUT_S + 15,
     "fit": media.PROBE_TIMEOUT_S + media.THUMBNAIL_TIMEOUT_S + 15,
 }
+
+#: How long an operation may wait for a free slot in the worker. Behind a full
+#: set of remuxes that can be a while; past this the worker is stuck.
+QUEUE_WAIT_S = media.REMUX_TIMEOUT_S + 60
 
 
 class WorkerUnavailable(Exception):
@@ -136,8 +142,14 @@ class RemoteTools:
         try:
             writer.write(json.dumps(request).encode() + b"\n")
             await writer.drain()
-            async with asyncio.timeout(TIMEOUTS_S[request["op"]]):
-                return await _read_reply(reader, on_progress)
+            limit = TIMEOUTS_S[request["op"]]
+            loop = asyncio.get_running_loop()
+            async with asyncio.timeout(QUEUE_WAIT_S) as deadline:
+
+                def started() -> None:
+                    deadline.reschedule(loop.time() + limit)
+
+                return await _read_reply(reader, on_progress, started)
         except TimeoutError as exc:
             raise WorkerUnavailable(f"the worker stopped answering a {request['op']}") from exc
         except (OSError, ValueError) as exc:
@@ -160,11 +172,24 @@ class RemoteTools:
                 await asyncio.sleep(0.5)
 
 
-async def _read_reply(reader: asyncio.StreamReader, on_progress: ProgressCallback | None) -> Any:
+async def _read_reply(
+    reader: asyncio.StreamReader,
+    on_progress: ProgressCallback | None,
+    on_start: Callable[[], None],
+) -> Any:
+    started = False
     while line := await reader.readline():
         message = json.loads(line)
         if not isinstance(message, dict):
             raise ValueError("a reply line wasn't a JSON object")
+        if "started" in message:
+            # Once only: it moves the deadline, and a worker that kept saying
+            # it had just started could otherwise put the deadline off forever.
+            if started or message["started"] is not True:
+                raise ValueError("the worker said it started twice")
+            started = True
+            on_start()
+            continue
         if "progress" in message:
             done, total = _progress(message["progress"])
             if on_progress is not None:

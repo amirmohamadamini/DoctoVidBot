@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import zipfile
 from datetime import datetime
@@ -40,9 +41,9 @@ def backups(
     )
 
 
-def test_the_backup_is_a_zip_of_a_working_database(store: Store, tmp_path: Path) -> None:
+async def test_the_backup_is_a_zip_of_a_working_database(store: Store, tmp_path: Path) -> None:
     store.seen(42)
-    archive = make_backup(store, tmp_path, datetime(2026, 9, 24, 9, 5))
+    archive = await make_backup(store, tmp_path, datetime(2026, 9, 24, 9, 5))
     assert archive.name == "doctovid-backup-2026-09-24-0905.zip"
 
     with zipfile.ZipFile(archive) as zipped:
@@ -99,3 +100,25 @@ async def test_last_delivered_is_tracked_apart_from_last_attempted(
     await working.send()
     clock[0] += 3 * 3600
     assert bare(working.describe(EN)) == "every 12 h, last delivered 3 h ago"
+
+
+async def test_two_backups_at_once_both_arrive(store: Store, tmp_path: Path) -> None:
+    first_uploading, carry_on = asyncio.Event(), asyncio.Event()
+
+    class SlowFirstUpload(FakeClient):
+        async def send_file(self, chat_id: int, path: str, **kwargs: Any) -> None:
+            if not first_uploading.is_set():
+                first_uploading.set()
+                await carry_on.wait()
+            await super().send_file(chat_id, path, **kwargs)
+
+    client = SlowFirstUpload()
+    scheduler = backups(store, client, tmp_path, [1_000_000.0], admins=frozenset({1}))
+    scheduled = asyncio.create_task(scheduler.send())
+    await first_uploading.wait()
+    tapped = asyncio.create_task(scheduler.send())
+    carry_on.set()
+
+    assert [await scheduled, await tapped] == [1, 1]
+    assert client.sent == [(1, [DATABASE_NAME]), (1, [DATABASE_NAME])]
+    assert list((tmp_path / "backups").iterdir()) == []

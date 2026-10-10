@@ -48,8 +48,9 @@ class Admin:
         self._is_keyboard_label = is_keyboard_label
         #: Admins the bot is waiting on for a message to broadcast.
         self._drafting: set[int] = set()
-        #: The message each admin drafted, waiting for them to confirm it. The
-        #: confirm button doesn't carry the id: only the drafted message can go.
+        #: The message each admin drafted, waiting for them to confirm it. A
+        #: confirm button names its draft, and only counts while that draft is
+        #: the admin's latest: an older button can't send a newer message.
         self._drafts: dict[int, int] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -106,7 +107,7 @@ class Admin:
             Html(""),
             self._activity(t),
             t.phrase("admin.users", count=users, active=active),
-            t.phrase("admin.cached", count=self._store.cache_size()),
+            t.phrase("admin.cached", count=self._store.cache_size(self._config.cache_channel_id)),
             t.phrase("admin.backups", state=self._backups.describe(t)),
         )
         if self.is_joining_required() and self._membership is not None and self._membership.broken:
@@ -144,7 +145,9 @@ class Admin:
         await _quietly(event.edit(text, buttons=to_buttons(keyboard)))
 
     async def _on_button(self, event: Any) -> None:
-        action = event.data.decode(errors="replace").removeprefix("adm:")
+        action, _, argument = (
+            event.data.decode(errors="replace").removeprefix("adm:").partition(":")
+        )
         t = self._t(event)
         match action:
             case "panel":
@@ -164,7 +167,7 @@ class Admin:
                     buttons=to_buttons([[Key(t.label("menu.cancel"), "adm:nocast", DANGER)]]),
                 )
             case "send":
-                await self._confirm_broadcast(event)
+                await self._confirm_broadcast(event, argument)
             case "nocast":
                 self._drafting.discard(event.sender_id)
                 self._drafts.pop(event.sender_id, None)
@@ -244,23 +247,25 @@ class Admin:
         count = len(self._store.reachable_users())
         buttons = [
             [
-                Key(t.label("broadcast.send"), "adm:send", SUCCESS),
+                Key(t.label("broadcast.send"), f"adm:send:{event.message.id}", SUCCESS),
                 Key(t.label("menu.cancel"), "adm:nocast", DANGER),
             ]
         ]
         await event.reply(t.text("broadcast.confirm", count=count), buttons=to_buttons(buttons))
 
-    async def _confirm_broadcast(self, event: Any) -> None:
+    async def _confirm_broadcast(self, event: Any, draft: str) -> None:
         t = self._t(event)
         if self._broadcaster.running:
             await event.answer(t.alert("broadcast.busy"), alert=True)
             return
-        message_id = self._drafts.pop(event.sender_id, None)
-        if message_id is None:
-            # Already sent, cancelled, or drafted before a restart.
+        message_id = self._drafts.get(event.sender_id)
+        if message_id is None or draft != str(message_id):
+            # Already sent, cancelled, replaced by a newer draft, or drafted
+            # before a restart.
             await event.answer()
-            await event.edit(t.text("broadcast.cancelled"))
+            await event.edit(t.text("broadcast.stale"))
             return
+        del self._drafts[event.sender_id]
         message = await self._client.get_messages(event.chat_id, ids=message_id)
         if message is None:
             await event.edit(t.text("broadcast.deleted"))
