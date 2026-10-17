@@ -166,8 +166,8 @@ class Admin:
                     t.text("broadcast.prompt"),
                     buttons=to_buttons([[Key(t.label("menu.cancel"), "adm:nocast", DANGER)]]),
                 )
-            case "send":
-                await self._confirm_broadcast(event, argument)
+            case "send" | "fwd":
+                await self._confirm_broadcast(event, argument, forward=action == "fwd")
             case "nocast":
                 self._drafting.discard(event.sender_id)
                 self._drafts.pop(event.sender_id, None)
@@ -243,17 +243,25 @@ class Admin:
         if self._broadcaster.running:
             await event.reply(t.text("broadcast.busy"))
             return
-        self._drafts[event.sender_id] = event.message.id
+        message_id = event.message.id
+        self._drafts[event.sender_id] = message_id
         count = len(self._store.reachable_users())
-        buttons = [
-            [
-                Key(t.label("broadcast.send"), f"adm:send:{event.message.id}", SUCCESS),
-                Key(t.label("menu.cancel"), "adm:nocast", DANGER),
+        parts = [t.phrase("broadcast.confirm", count=count)]
+        cancel = Key(t.label("menu.cancel"), "adm:nocast", DANGER)
+        if _forwarded(event.message):
+            parts += [Html(""), t.phrase("broadcast.forward_hint")]
+            buttons = [
+                [
+                    Key(t.label("broadcast.copy"), f"adm:send:{message_id}", SUCCESS),
+                    Key(t.label("broadcast.forward"), f"adm:fwd:{message_id}", SUCCESS),
+                ],
+                [cancel],
             ]
-        ]
-        await event.reply(t.text("broadcast.confirm", count=count), buttons=to_buttons(buttons))
+        else:
+            buttons = [[Key(t.label("broadcast.send"), f"adm:send:{message_id}", SUCCESS), cancel]]
+        await event.reply(t.lines(*parts), buttons=to_buttons(buttons))
 
-    async def _confirm_broadcast(self, event: Any, draft: str) -> None:
+    async def _confirm_broadcast(self, event: Any, draft: str, *, forward: bool) -> None:
         t = self._t(event)
         if self._broadcaster.running:
             await event.answer(t.alert("broadcast.busy"), alert=True)
@@ -270,22 +278,28 @@ class Admin:
         if message is None:
             await event.edit(t.text("broadcast.deleted"))
             return
+        # Forwarding the admin's own message would show everyone who sent it.
+        forward = forward and _forwarded(message)
         await event.edit(t.text("broadcast.started"))
-        task = asyncio.create_task(self._broadcast(event, message, t))
+        task = asyncio.create_task(self._broadcast(event, message, t, forward))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _broadcast(self, event: Any, message: Any, t: Locale) -> None:
+    async def _broadcast(self, event: Any, message: Any, t: Locale, forward: bool) -> None:
         async def report(tally: Tally) -> None:
             await _quietly(event.edit(t.text("broadcast.progress", tally=tally.describe(t))))
 
         try:
-            tally = await self._broadcaster.send(message, report)
+            tally = await self._broadcaster.send(message, report, forward=forward)
         except Exception:
             log.exception("broadcast failed")
             await _quietly(event.edit(t.text("broadcast.failed")))
             return
         await _quietly(event.edit(t.text("broadcast.finished", tally=tally.describe(t))))
+
+
+def _forwarded(message: Any) -> bool:
+    return getattr(message, "fwd_from", None) is not None
 
 
 def _state(on: bool, t: Locale) -> Html:

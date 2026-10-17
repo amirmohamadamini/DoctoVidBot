@@ -183,6 +183,9 @@ prompt = """Send me the message to broadcast: text, a photo, a video, a file, an
 Nothing is sent until you confirm."""
 confirm = { one = "Send this message to {count} person?", other = "Send this message to {count} people?" }
 send = "✅ Send"
+copy = "📋 Send as copy"
+forward = "↪️ Forward"
+forward_hint = "<i>Forward keeps the “Forwarded from” line of the original. Send as copy sends it as the bot's own message.</i>"
 cancelled = "Broadcast cancelled."
 stale = "That draft was already sent, cancelled or replaced. Tap 📣 Broadcast to start again."
 busy = "A broadcast is already running."

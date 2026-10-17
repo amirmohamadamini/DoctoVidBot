@@ -66,7 +66,9 @@ Report = Callable[[Tally], Awaitable[None]]
 
 class Broadcaster:
     """One broadcast at a time. The message is copied, so it arrives without a
-    "forwarded from" header and without revealing the admin who sent it."""
+    "forwarded from" header and without revealing the admin who sent it, unless
+    the admin asks to forward a message they forwarded to the bot: then it
+    keeps that message's original header."""
 
     def __init__(
         self,
@@ -84,21 +86,21 @@ class Broadcaster:
         self._now = now
         self.running = False
 
-    async def send(self, message: Any, report: Report) -> Tally:
+    async def send(self, message: Any, report: Report, *, forward: bool = False) -> Tally:
         if self.running:
             raise RuntimeError("a broadcast is already running")
         self.running = True
         try:
-            return await self._send(message, report)
+            return await self._send(message, report, forward)
         finally:
             self.running = False
 
-    async def _send(self, message: Any, report: Report) -> Tally:
+    async def _send(self, message: Any, report: Report, forward: bool) -> Tally:
         users = self._store.reachable_users()
         tally = Tally(total=len(users))
         last_report = self._now()
         for user_id in users:
-            if not await self._deliver(user_id, message, tally):
+            if not await self._deliver(user_id, message, forward, tally):
                 tally.stopped = True
                 break
             if self._now() - last_report >= REPORT_EVERY_S:
@@ -107,11 +109,14 @@ class Broadcaster:
             await self._sleep(self._pace_s)
         return tally
 
-    async def _deliver(self, user_id: int, message: Any, tally: Tally) -> bool:
+    async def _deliver(self, user_id: int, message: Any, forward: bool, tally: Tally) -> bool:
         """Count one delivery. False means stop the whole broadcast."""
         for _ in range(3):
             try:
-                await self._client.send_message(user_id, message)
+                if forward:
+                    await self._client.forward_messages(user_id, message)
+                else:
+                    await self._client.send_message(user_id, message)
             except FloodWaitError as exc:
                 if exc.seconds > MAX_WAIT_S:
                     log.warning("broadcast stopped by a %s s FloodWait", exc.seconds)

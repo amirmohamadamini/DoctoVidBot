@@ -14,6 +14,7 @@ class FakeClient:
     def __init__(self, failures: dict[int, list[Exception]] | None = None) -> None:
         self.failures = failures or {}
         self.delivered: list[int] = []
+        self.forwarded: list[int] = []
 
     async def send_message(self, user_id: int, message: Any) -> None:
         pending = self.failures.get(user_id)
@@ -21,8 +22,14 @@ class FakeClient:
             raise pending.pop(0)
         self.delivered.append(user_id)
 
+    async def forward_messages(self, user_id: int, message: Any) -> None:
+        await self.send_message(user_id, message)
+        self.forwarded.append(user_id)
 
-async def run(client: FakeClient, store: Store) -> tuple[Tally, list[float]]:
+
+async def run(
+    client: FakeClient, store: Store, *, forward: bool = False
+) -> tuple[Tally, list[float]]:
     slept: list[float] = []
 
     async def sleep(seconds: float) -> None:
@@ -32,7 +39,7 @@ async def run(client: FakeClient, store: Store) -> tuple[Tally, list[float]]:
         pass
 
     broadcaster = Broadcaster(client, store, sleep=sleep)
-    return await broadcaster.send("hello", report), slept
+    return await broadcaster.send("hello", report, forward=forward), slept
 
 
 def users(store: Store, *ids: int) -> None:
@@ -46,6 +53,14 @@ async def test_everyone_gets_it(store: Store) -> None:
     tally, _ = await run(client, store)
     assert client.delivered == [1, 2, 3]
     assert (tally.sent, tally.total) == (3, 3)
+
+
+async def test_a_forward_is_forwarded_and_handled_the_same(store: Store) -> None:
+    users(store, 1, 2, 3)
+    client = FakeClient({2: [UserIsBlockedError(request=None)]})
+    tally, _ = await run(client, store, forward=True)
+    assert client.forwarded == [1, 3]
+    assert (tally.sent, tally.unreachable) == (2, 1)
 
 
 async def test_blocked_users_are_skipped_next_time(store: Store) -> None:

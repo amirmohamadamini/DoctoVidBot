@@ -21,13 +21,21 @@ from .conftest import EN, FA, LOCALES, bare
 class Chat:
     """An admin's chat with the bot, as one event: a message or a button tap."""
 
-    def __init__(self, sender: int, *, text: str = "", data: str = "", message_id: int = 0):
+    def __init__(
+        self,
+        sender: int,
+        *,
+        text: str = "",
+        data: str = "",
+        message_id: int = 0,
+        forwarded: bool = False,
+    ):
         self.sender_id = sender
         self.chat_id = sender
         self.is_private = True
         self.raw_text = text
         self.data = data.encode()
-        self.message = SimpleNamespace(id=message_id)
+        self.message = SimpleNamespace(id=message_id, fwd_from=object() if forwarded else None)
         self.said: list[str] = []
         self.answers: list[str] = []
         self.edited: list[str] = []
@@ -50,10 +58,17 @@ class Chat:
 class FakeClient:
     def __init__(self) -> None:
         self.copied: list[int] = []
+        self.forwarded: list[int] = []
         self.files: list[int] = []
+        #: Messages in the admin's chat that were forwarded from somewhere.
+        self.forwards: set[int] = set()
 
     async def get_messages(self, chat_id: int, ids: int) -> Any:
-        return SimpleNamespace(id=ids)
+        return SimpleNamespace(id=ids, fwd_from=object() if ids in self.forwards else None)
+
+    async def forward_messages(self, chat_id: int, message: Any) -> Any:
+        self.forwarded.append(chat_id)
+        return [SimpleNamespace(id=1)]
 
     async def send_message(self, chat_id: int, message: Any) -> Any:
         self.copied.append(chat_id)
@@ -183,9 +198,9 @@ async def test_broadcast_asks_for_the_message_then_confirms(
     )
 
 
-async def draft(admin: Admin, message_id: int) -> Chat:
+async def draft(admin: Admin, message_id: int, *, forwarded: bool = False) -> Chat:
     await tap(admin, "adm:cast")
-    event = Chat(7, text="news", message_id=message_id)
+    event = Chat(7, text="news", message_id=message_id, forwarded=forwarded)
     with pytest.raises(events.StopPropagation):
         await admin._admins_only(admin._on_draft)(event)
     return event
@@ -230,6 +245,55 @@ async def test_an_older_confirm_cannot_send_a_newer_draft(
     await tap(admin, "adm:send:56")
     await finish(admin)
     assert client.copied == [1]
+
+
+async def test_a_forwarded_draft_can_be_forwarded_or_copied(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.seen(1)
+    client.forwards.add(55)
+    event = await draft(admin, 55, forwarded=True)
+    assert "Forwarded from" in bare(event.said[-1])
+    assert [[button.type.data for button in row] for row in event.buttons] == [
+        [b"adm:send:55", b"adm:fwd:55"],
+        [b"adm:nocast"],
+    ]
+    await tap(admin, "adm:fwd:55")
+    await finish(admin)
+    assert (client.forwarded, client.copied) == ([1], [])
+
+    client.forwards.add(56)
+    await draft(admin, 56, forwarded=True)
+    await tap(admin, "adm:send:56")
+    await finish(admin)
+    assert (client.forwarded, client.copied) == ([1], [1])
+
+
+async def test_the_admins_own_message_is_never_forwarded(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.seen(1)
+    event = await draft(admin, 55)
+    assert [[button.type.data for button in row] for row in event.buttons] == [
+        [b"adm:send:55", b"adm:nocast"]
+    ]
+    # A forged forward of a message the admin wrote is sent as a copy, so it
+    # doesn't show everyone who wrote it.
+    await tap(admin, "adm:fwd:55")
+    await finish(admin)
+    assert (client.forwarded, client.copied) == ([], [1])
+
+
+async def test_a_forward_confirm_is_checked_like_any_other(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.seen(1)
+    client.forwards.update({55, 56})
+    await draft(admin, 55, forwarded=True)
+    await draft(admin, 56, forwarded=True)
+    await tap(admin, "adm:fwd:55")
+    await tap(admin, "adm:fwd")
+    assert client.forwarded == []
 
 
 async def test_malformed_button_data_is_harmless(admin: Admin) -> None:
