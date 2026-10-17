@@ -23,7 +23,10 @@ async def ignore_progress(done: int, total: int) -> None:
 class FakeClient:
     uploads: list[dict[str, Any]] = field(default_factory=list)
     sends: list[dict[str, Any]] = field(default_factory=list)
-    stale_references: int = 0
+    #: Media whose file reference has expired. Only fetching the message
+    #: again gives one that works.
+    stale_media: set[Any] = field(default_factory=set)
+    fetches: int = 0
     messages: dict[int, Any] = field(default_factory=dict)
     actions: list[str] = field(default_factory=list)
 
@@ -36,13 +39,13 @@ class FakeClient:
         return SimpleNamespace(name=kwargs["file_name"])
 
     async def send_file(self, chat_id: int, file: Any, **kwargs: Any) -> Any:
-        if self.stale_references:
-            self.stale_references -= 1
+        if any(file == stale for stale in self.stale_media):
             raise FileReferenceExpiredError(request=None)
         self.sends.append({"chat_id": chat_id, "file": file, **kwargs})
         return SimpleNamespace(id=900 + len(self.sends))
 
     async def get_messages(self, chat_id: int, ids: int) -> Any:
+        self.fetches += 1
         return self.messages.get(ids)
 
     async def download_file(self, document: Any, dest: str, **kwargs: Any) -> None:
@@ -127,9 +130,25 @@ async def test_a_file_is_sent_as_a_document() -> None:
     assert client.sends[0]["mime_type"] == "application/pdf"
 
 
+class Refreshing(FakeClient):
+    """Each fetch of a message carries a new file reference."""
+
+    async def get_messages(self, chat_id: int, ids: int) -> Any:
+        self.fetches += 1
+        return SimpleNamespace(media=f"reference {self.fetches}")
+
+
 async def test_a_copy_refetches_a_stale_file_reference() -> None:
-    client = FakeClient(stale_references=1, messages={5: SimpleNamespace(media="media")})
+    client = Refreshing(stale_media={"reference 1"})
     assert await TelethonTransport(client).copy(-100, 5, 42) == 901
+    assert client.sends[0]["file"] == "reference 2"
+
+
+async def test_a_reference_still_stale_after_refetching_is_an_error() -> None:
+    client = Refreshing(stale_media={"reference 1", "reference 2"})
+    with pytest.raises(FileReferenceExpiredError):
+        await TelethonTransport(client).copy(-100, 5, 42)
+    assert client.fetches == 2
 
 
 async def test_copying_a_deleted_message_returns_none() -> None:

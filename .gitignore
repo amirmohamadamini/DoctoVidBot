@@ -1,9 +1,16 @@
 # Secrets and runtime state
 .env
+.env.*
+!.env.example
 data/
 *.session
-*.session-journal
+*.session-*
 *.db
+*.db-*
+*.sqlite
+*.sqlite3
+backup-tmp/
+doctovid-backup-*.zip
 
 # Python
 __pycache__/

@@ -1,7 +1,15 @@
 .git
 .github
 .env
+.env.*
 data
+**/*.session
+**/*.session-*
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite3
+**/doctovid-backup-*.zip
 tests
 .venv
 **/__pycache__
