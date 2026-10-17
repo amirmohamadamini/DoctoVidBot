@@ -672,6 +672,10 @@ class Bot:
             buttons=Button.force_reply(selective=True, placeholder=hint[:64]),
             reply_to=request.message_id,
         )
+        # The menu may have been cancelled or expired while that was sent.
+        if self._requests.get(request.id) is not request:
+            await self._delete(request.user_id, sent.id)
+            return
         self._prompts[request.user_id] = Prompt(request.id, kind, sent.id)
 
     async def _show_position(self, job: Job, position: int) -> None:
@@ -732,6 +736,9 @@ class Bot:
                 del self._thumbnail_attempts[user_id]
         if self._membership is not None:
             self._membership.forget_expired()
+        for user_id, prompt in list(self._prompts.items()):
+            if prompt.request_id not in self._requests:
+                del self._prompts[user_id]
         for request in [r for r in self._requests.values() if r.expires_at <= now]:
             self._close(request)
             await self._edit(

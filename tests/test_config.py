@@ -108,3 +108,18 @@ def test_the_default_language_is_checked() -> None:
     assert load({**REQUIRED, "DEFAULT_LANGUAGE": "FA"}).default_language == "fa"
     with pytest.raises(ConfigError, match="DEFAULT_LANGUAGE must be one of en, fa"):
         load({**REQUIRED, "DEFAULT_LANGUAGE": "klingon"})
+
+
+@pytest.mark.parametrize("scratch", ["data", ".", "data/thumbs", "data/backup-tmp/x", "data/link"])
+def test_scratch_cannot_hold_what_startup_must_keep(tmp_path: Path, scratch: str) -> None:
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "link").symlink_to(tmp_path / "data")
+    env = {**REQUIRED, "DATA_DIR": str(tmp_path / "data"), "SCRATCH_DIR": str(tmp_path / scratch)}
+    with pytest.raises(ConfigError, match="SCRATCH_DIR"):
+        load(env)
+
+
+@pytest.mark.parametrize("scratch", ["data/work", "scratch"])
+def test_scratch_beside_or_inside_the_data_directory(tmp_path: Path, scratch: str) -> None:
+    env = {**REQUIRED, "DATA_DIR": str(tmp_path / "data"), "SCRATCH_DIR": str(tmp_path / scratch)}
+    assert load(env).scratch_dir == tmp_path / scratch

@@ -20,6 +20,10 @@ log = logging.getLogger(__name__)
 
 CHECK_EVERY_S = 60.0
 
+#: How long sending the backup to one admin may take. A send Telegram never
+#: answers would otherwise hold the backup lock, and every backup after it.
+SEND_TIMEOUT_S = 600.0
+
 #: Only the database. The Telegram session is a login secret: anyone holding it
 #: can act as the bot, and it doesn't belong in a chat.
 DATABASE_NAME = "doctovid.db"
@@ -65,8 +69,10 @@ class Backups:
         now: Callable[[], float] = time.time,
         calendar_now: Callable[[], datetime] = datetime.now,
         locale_for: Callable[[int], Locale],
+        send_timeout_s: float = SEND_TIMEOUT_S,
     ) -> None:
         self._client = client
+        self._send_timeout_s = send_timeout_s
         self._store = store
         self._admins = admins
         self._interval_s = interval_hours * 3600
@@ -131,9 +137,10 @@ class Backups:
                     caption = self._locale_for(admin).text(
                         "backup.caption", users=users, active=active
                     )
-                    await self._client.send_file(
-                        admin, str(archive), caption=caption, force_document=True
-                    )
+                    async with asyncio.timeout(self._send_timeout_s):
+                        await self._client.send_file(
+                            admin, str(archive), caption=caption, force_document=True
+                        )
                     delivered += 1
                 except Exception:
                     # Usually an admin who has never started the bot, which

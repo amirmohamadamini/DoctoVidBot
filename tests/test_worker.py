@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from doctovid import media, tools
+from doctovid import media, tools, worker
 from doctovid.config import load
 from doctovid.runner import Runner
 from doctovid.store import Store
@@ -312,3 +312,15 @@ async def test_a_worker_cannot_keep_putting_the_deadline_off(
     async with server:
         with pytest.raises(WorkerUnavailable):
             await RemoteTools(socket_path).probe(Path("/scratch/source"))
+
+
+@pytest.mark.parametrize("parallel", ["0", "-1", "65"])
+def test_a_worker_with_no_usable_slots_refuses_to_start(
+    parallel: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with pytest.raises(ValueError, match="between 1 and"):
+        Worker(tmp_path, parallel=int(parallel))
+    monkeypatch.setenv("MEDIA_PARALLEL", parallel)
+    monkeypatch.setattr(worker, "serve", None)
+    with pytest.raises(SystemExit, match="MEDIA_PARALLEL must be between 1 and"):
+        worker.main()

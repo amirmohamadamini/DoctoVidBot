@@ -805,6 +805,42 @@ async def test_a_menu_cancelled_mid_rename_is_not_sent_again(config: Config, sto
     assert len(client.sent) == sent_before
 
 
+async def test_a_menu_cancelled_while_its_prompt_is_sent_leaves_no_prompt(
+    config: Config, store: Store
+) -> None:
+    class SlowSends(FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.sending = asyncio.Event()
+            self.go = asyncio.Event()
+
+        async def send_message(self, chat_id: int, text: str, **kwargs: Any) -> Sent:
+            if "new name" in text:
+                self.sending.set()
+                await self.go.wait()
+            return await super().send_message(chat_id, text, **kwargs)
+
+    client = SlowSends()
+    bot = Bot(client, config, store, now=lambda: 0.0)
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    asking = asyncio.create_task(bot._on_button(tap(bot, client, 42, "name:1")))
+    await client.sending.wait()
+    await bot._on_button(tap(bot, client, 42, "drop:1"))
+    client.go.set()
+    await asking
+
+    assert bot._prompts == {}
+    assert client.sent[-1].id in client.deleted
+
+
+async def test_the_sweep_forgets_a_prompt_whose_menu_is_gone(bot: Bot, client: FakeClient) -> None:
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    await bot._on_button(tap(bot, client, 42, "name:1"))
+    bot._requests.clear()
+    await bot.sweep()
+    assert bot._prompts == {}
+
+
 def test_a_job_keeps_the_status_message_it_was_queued_with() -> None:
     request = make_request(menu_message_id=500)
     job = Job(id=1, request=request, mode=Mode.VIDEO)

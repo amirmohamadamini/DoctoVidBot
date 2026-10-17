@@ -223,6 +223,21 @@ def load(env: Mapping[str, str] | None = None) -> Config:
         default_language=read.language("DEFAULT_LANGUAGE", i18n.REFERENCE),
         log_level=read.choice("LOG_LEVEL", "INFO", LOG_LEVELS),
     )
+    read.problems += _overlaps(config)
     if read.problems:
         raise ConfigError(read.problems)
     return config
+
+
+def _overlaps(config: Config) -> list[str]:
+    """Startup empties the scratch directory. One that holds the session and
+    the database, or the bot's private directories, would empty them too.
+    Compared resolved, so a symlink can't hide the overlap."""
+    scratch = config.scratch_dir.resolve()
+    data = config.data_dir.resolve()
+    if scratch == data or scratch in data.parents:
+        return ["SCRATCH_DIR must not be DATA_DIR or a directory above it"]
+    for private in (config.thumbnail_dir.resolve(), config.backup_dir.resolve()):
+        if scratch == private or scratch in private.parents or private in scratch.parents:
+            return [f"SCRATCH_DIR must be apart from {private.name} in DATA_DIR"]
+    return []

@@ -21,7 +21,7 @@ from .names import extension, with_extension
 from .quota import Calendar
 from .safefile import UnsafeFile, claim, read_small
 from .store import Store
-from .tools import LocalTools, MediaTools, WorkerUnavailable
+from .tools import QUEUE_WAIT_S, TIMEOUTS_S, LocalTools, MediaTools, WorkerUnavailable
 from .transport import DANGER, FileChanged, Key, Keyboard, Transport
 
 log = logging.getLogger(__name__)
@@ -40,6 +40,18 @@ MIN_DISK_MARGIN_BYTES = 1024**3
 
 #: Telegram rejects thumbnails over 200 KB; anything much bigger isn't one.
 THUMBNAIL_READ_LIMIT = 1024 * 1024
+
+#: A job slower than this, both ways, is taken to be stuck on a request that
+#: will never finish, and given up so it frees its worker and its disk.
+STUCK_BYTES_PER_S = 64 * 1024
+TRANSFER_GRACE_S = 600.0
+
+
+def job_deadline_s(size: int) -> float:
+    """Time enough for the download and the upload at a crawl, and for the
+    media worker to probe, repack and take a thumbnail at its slowest."""
+    transfers = 2 * (TRANSFER_GRACE_S + size / STUCK_BYTES_PER_S)
+    return transfers + QUEUE_WAIT_S + sum(TIMEOUTS_S.values())
 
 
 def job_directory(root: Path, job_id: int) -> Path:
@@ -99,8 +111,10 @@ class Runner:
         calendar: Calendar | None = None,
         tools: MediaTools | None = None,
         locale_for: Callable[[int], Locale] | None = None,
+        deadline_s: Callable[[int], float] = job_deadline_s,
     ) -> None:
         self._config = config
+        self._deadline_s = deadline_s
         english = i18n.load().default
         self._locale_for = locale_for or (lambda _user_id: english)
         self._tools = tools or LocalTools()
@@ -152,9 +166,16 @@ class Runner:
             return
 
         self._held[job.id] = 0
+        deadline = asyncio.timeout(self._deadline_s(job.request.size))
         try:
             self._reserve(job, workdir, job.request.size)
-            message_id = await self._process(job, workdir)
+            async with deadline:
+                message_id = await self._process(job, workdir)
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            log.warning("job %s: still not done after its deadline, given up", job.id)
+            raise JobFailed("job.stuck") from None
         finally:
             self._reserved -= self._held.pop(job.id)
         self._count(job)

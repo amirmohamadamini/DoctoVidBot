@@ -16,11 +16,14 @@ from .conftest import EN, bare
 class FakeClient:
     def __init__(self, unreachable: frozenset[int] = frozenset()) -> None:
         self.unreachable = unreachable
+        self.hangs: set[int] = set()
         self.sent: list[tuple[int, list[str]]] = []
 
     async def send_file(self, chat_id: int, path: str, **kwargs: Any) -> None:
         if chat_id in self.unreachable:
             raise ValueError("never started the bot")
+        if chat_id in self.hangs:
+            await asyncio.Event().wait()
         with zipfile.ZipFile(path) as archive:
             self.sent.append((chat_id, archive.namelist()))
 
@@ -79,6 +82,19 @@ async def test_the_schedule_survives_a_restart(store: Store, tmp_path: Path) -> 
 async def test_one_unreachable_admin_does_not_stop_the_others(store: Store, tmp_path: Path) -> None:
     client = FakeClient(unreachable=frozenset({1}))
     assert await backups(store, client, tmp_path, [0.0]).send() == 1
+
+
+async def test_a_send_that_never_returns_does_not_hold_the_backup(
+    store: Store, tmp_path: Path
+) -> None:
+    client = FakeClient()
+    client.hangs.add(1)
+    scheduler = backups(store, client, tmp_path, [0.0], send_timeout_s=0.05)
+    async with asyncio.timeout(5):
+        assert await scheduler.send() == 1
+    assert client.sent == [(2, [DATABASE_NAME])]
+    client.hangs.clear()
+    assert await scheduler.send() == 2
 
 
 def test_zero_hours_turns_backups_off(store: Store, tmp_path: Path) -> None:

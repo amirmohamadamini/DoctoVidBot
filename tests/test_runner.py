@@ -16,7 +16,7 @@ from doctovid.config import Config
 from doctovid.i18n import RLM
 from doctovid.jobs import Mode
 from doctovid.quota import Calendar, Usage
-from doctovid.runner import MIN_DISK_MARGIN_BYTES, Runner, usable_disk
+from doctovid.runner import MIN_DISK_MARGIN_BYTES, Runner, job_deadline_s, usable_disk
 from doctovid.store import Store
 from doctovid.tools import LocalTools
 
@@ -267,6 +267,26 @@ async def test_a_floodwait_tells_the_user_how_long(
     monkeypatch.setattr(telegram, "upload", limited)
     await runner(make_job(make_request("doc.pdf", is_video=False), mode=Mode.FILE))
     assert "Try again in 2 min." in telegram.edits[-1]
+
+
+async def test_a_transfer_that_never_ends_is_given_up(
+    config: Config, store: Store, telegram: FakeTransport, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def stuck(*args: Any, **kwargs: Any) -> bool:
+        await asyncio.Event().wait()
+        return True
+
+    monkeypatch.setattr(telegram, "download", stuck)
+    runner = Runner(config, store, telegram, deadline_s=lambda _size: 0.05)
+    await runner(make_job(make_request("doc.pdf", is_video=False), mode=Mode.FILE))
+
+    assert "took far too long" in telegram.edits[-1]
+    assert runner._reserved == 0
+    assert store.usage(42, Calendar("UTC").today())[0] == Usage()
+
+
+def test_a_bigger_file_gets_longer_but_never_forever() -> None:
+    assert 3600 < job_deadline_s(0) < job_deadline_s(2 * 1024**3) < float("inf")
 
 
 @pytest.mark.usefixtures("pdf")

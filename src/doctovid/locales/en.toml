@@ -130,6 +130,7 @@ converter_down = "⚠️ The video converter isn't available right now. Please t
 flood = "⚠️ Telegram is limiting this bot right now. Try again in {wait}."
 refused = "⚠️ Telegram refused that request. Please try again later."
 crashed = "⚠️ Something went wrong on our side. Please try again later."
+stuck = "That took far too long, so it was stopped. Please try again later."
 
 [progress]
 downloading = "⬇️ Downloading <b>{name}</b>"

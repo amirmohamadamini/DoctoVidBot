@@ -40,6 +40,7 @@ log = logging.getLogger("doctovid.worker")
 
 #: Operations at once. The bot runs `WORKERS` jobs and up to two thumbnails.
 DEFAULT_PARALLEL = 4
+MAX_PARALLEL = 64
 
 REQUEST_TIMEOUT_S = 10.0
 
@@ -53,6 +54,9 @@ Send = Callable[[dict[str, Any]], Awaitable[None]]
 
 class Worker:
     def __init__(self, scratch: Path, *, parallel: int = DEFAULT_PARALLEL) -> None:
+        # With no slots it would listen, and never start anything.
+        if not 1 <= parallel <= MAX_PARALLEL:
+            raise ValueError(f"parallel must be between 1 and {MAX_PARALLEL}, got {parallel}")
         self._root = os.path.realpath(scratch)
         self._slots = asyncio.Semaphore(parallel)
         self._active: set[asyncio.Task[Any]] = set()
@@ -186,6 +190,12 @@ async def serve(
 
 
 def main() -> None:
+    try:
+        parallel = int(os.environ.get("MEDIA_PARALLEL", DEFAULT_PARALLEL))
+    except ValueError:
+        sys.exit("MEDIA_PARALLEL must be a whole number")
+    if not 1 <= parallel <= MAX_PARALLEL:
+        sys.exit(f"MEDIA_PARALLEL must be between 1 and {MAX_PARALLEL}, got {parallel}")
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -197,10 +207,6 @@ def main() -> None:
     os.umask(0o027)
     socket_path = Path(os.environ.get("MEDIA_SOCKET", "/scratch/sock/media.sock"))
     scratch = Path(os.environ.get("SCRATCH_DIR", "/scratch/jobs"))
-    try:
-        parallel = int(os.environ.get("MEDIA_PARALLEL", DEFAULT_PARALLEL))
-    except ValueError:
-        sys.exit("MEDIA_PARALLEL must be a whole number")
     asyncio.run(serve(socket_path, scratch, parallel=parallel))
 
 
