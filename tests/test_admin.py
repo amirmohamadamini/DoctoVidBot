@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -62,8 +63,19 @@ class FakeClient:
         self.files: list[int] = []
         #: Messages in the admin's chat that were forwarded from somewhere.
         self.forwards: set[int] = set()
+        #: Set, fetching a message waits for it.
+        self.hold: asyncio.Event | None = None
+        self.fetch_error: Exception | None = None
+        self.handlers: list[Any] = []
+
+    def add_event_handler(self, callback: Any, event: Any) -> None:
+        self.handlers.append(callback)
 
     async def get_messages(self, chat_id: int, ids: int) -> Any:
+        if self.hold is not None:
+            await self.hold.wait()
+        if self.fetch_error is not None:
+            raise self.fetch_error
         return SimpleNamespace(id=ids, fwd_from=object() if ids in self.forwards else None)
 
     async def forward_messages(self, chat_id: int, message: Any) -> Any:
@@ -144,6 +156,20 @@ async def test_other_people_cannot_press_admin_buttons(admin: Admin, store: Stor
     event = Chat(42, data="adm:cache")
     await admin._admins_only(admin._on_button)(event)
     assert not store.cache_enabled()
+
+
+async def test_every_registered_handler_turns_away_other_people(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    admin.register()
+    assert len(client.handlers) == 2
+    admin._drafting.add(42)
+    for handler in client.handlers:
+        event = Chat(42, text="hello", data="adm:cache", message_id=55)
+        await handler(event)
+        assert (event.said, event.edited) == ([], [])
+    assert not store.cache_enabled()
+    assert admin._drafts == {}
 
 
 async def test_the_cache_button_toggles_after_checking_the_channel(
@@ -294,6 +320,41 @@ async def test_a_forward_confirm_is_checked_like_any_other(
     await tap(admin, "adm:fwd:55")
     await tap(admin, "adm:fwd")
     assert client.forwarded == []
+
+
+async def test_two_confirms_at_once_send_once_and_lose_nothing(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.seen(1)
+    await draft(admin, 55)
+    client.hold = asyncio.Event()
+    first = asyncio.create_task(tap(admin, "adm:send:55"))
+    await asyncio.sleep(0)
+    second = await tap(admin, "adm:send:55")
+    assert second.answers == [EN.alert("broadcast.busy")]
+    assert second.edited == []
+
+    client.hold.set()
+    await first
+    await finish(admin)
+    assert client.copied == [1]
+    assert not admin._broadcaster.running
+
+
+async def test_a_failed_confirm_keeps_the_draft(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.seen(1)
+    await draft(admin, 55)
+    client.fetch_error = ConnectionError("network down")
+    with pytest.raises(ConnectionError):
+        await admin._on_button(Chat(7, data="adm:send:55"))
+    assert not admin._broadcaster.running
+
+    client.fetch_error = None
+    await tap(admin, "adm:send:55")
+    await finish(admin)
+    assert client.copied == [1]
 
 
 async def test_malformed_button_data_is_harmless(admin: Admin) -> None:

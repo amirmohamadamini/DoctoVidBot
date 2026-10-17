@@ -10,7 +10,7 @@ from typing import Any
 from telethon import events
 
 from .backup import Backups
-from .broadcast import Broadcaster, Tally
+from .broadcast import Broadcaster, Refetch, Tally
 from .config import Config
 from .i18n import Html, Locale, plain
 from .membership import POSTING_FIX, Membership, channel_problem
@@ -263,34 +263,54 @@ class Admin:
 
     async def _confirm_broadcast(self, event: Any, draft: str, *, forward: bool) -> None:
         t = self._t(event)
-        if self._broadcaster.running:
+        if not self._broadcaster.claim():
             await event.answer(t.alert("broadcast.busy"), alert=True)
             return
+        started = False
+        try:
+            started = await self._start_broadcast(event, t, draft, forward)
+        finally:
+            if not started:
+                self._broadcaster.release()
+
+    async def _start_broadcast(self, event: Any, t: Locale, draft: str, forward: bool) -> bool:
+        """Under the broadcast slot. True once the broadcast task owns it."""
         message_id = self._drafts.get(event.sender_id)
         if message_id is None or draft != str(message_id):
             # Already sent, cancelled, replaced by a newer draft, or drafted
             # before a restart.
             await event.answer()
             await event.edit(t.text("broadcast.stale"))
-            return
-        del self._drafts[event.sender_id]
-        message = await self._client.get_messages(event.chat_id, ids=message_id)
+            return False
+        chat_id = event.chat_id
+        message = await self._client.get_messages(chat_id, ids=message_id)
         if message is None:
+            self._drafts.pop(event.sender_id, None)
             await event.edit(t.text("broadcast.deleted"))
-            return
+            return False
         # Forwarding the admin's own message would show everyone who sent it.
         forward = forward and _forwarded(message)
         await event.edit(t.text("broadcast.started"))
-        task = asyncio.create_task(self._broadcast(event, message, t, forward))
+        # Only now, once it is sure to go: a failure before here leaves the
+        # draft for the admin to confirm again.
+        self._drafts.pop(event.sender_id, None)
+
+        async def refetch() -> Any:
+            return await self._client.get_messages(chat_id, ids=message_id)
+
+        task = asyncio.create_task(self._broadcast(event, message, t, forward, refetch))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return True
 
-    async def _broadcast(self, event: Any, message: Any, t: Locale, forward: bool) -> None:
+    async def _broadcast(
+        self, event: Any, message: Any, t: Locale, forward: bool, refetch: Refetch
+    ) -> None:
         async def report(tally: Tally) -> None:
             await _quietly(event.edit(t.text("broadcast.progress", tally=tally.describe(t))))
 
         try:
-            tally = await self._broadcaster.send(message, report, forward=forward)
+            tally = await self._broadcaster.send(message, report, forward=forward, refetch=refetch)
         except Exception:
             log.exception("broadcast failed")
             await _quietly(event.edit(t.text("broadcast.failed")))
