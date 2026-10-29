@@ -191,6 +191,8 @@ admin = "That's an admin. Admins can't be banned."
 confirm_user = "Ban {user}? They won't be able to use the bot."
 confirm_file = { one = "{count} person sent this file: {users}. Ban them, and anyone who sends it from now on?", other = "{count} people sent this file: {users}. Ban them, and anyone who sends it from now on?" }
 confirm_unsent = "Nobody has sent this file yet. Ban it, so anyone who sends it is banned?"
+confirm_unrecorded = "This file is in the cache, but it was sent before the bot started recording who sends what, so I can't tell who sent it. Ban the file, so anyone who sends it from now on is banned?"
+untraced = "That message is in the cache channel, but the cache index has no entry for it, so I can't tell which file it was made from."
 confirm = "🚫 Ban"
 cancelled = "Nobody was banned."
 stale = "That ban was already done, cancelled or replaced. Tap 🚫 Ban to start again."

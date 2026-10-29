@@ -26,8 +26,19 @@ ALERT_LIMIT = 200
 #: How many of a file's senders a ban confirmation lists by id.
 LISTED_SENDERS = 30
 
-#: Telegram deletes at most this many messages in one request.
+#: Telegram deletes, or fetches, at most this many messages in one request.
 DELETE_BATCH = 100
+FETCH_BATCH = 100
+
+
+@dataclass(frozen=True, slots=True)
+class Traced:
+    """What a file an admin sent leads back to."""
+
+    #: The file users sent, or None when a cache copy can't be traced.
+    document_id: int | None
+    #: The admin's file is a copy from the cache channel.
+    cached: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,7 +284,11 @@ class Admin:
     async def _on_ban_answer(self, event: Any, kind: str) -> None:
         t = self._t(event)
         user_id = _user_id(event.raw_text or "")
-        document_id = None if user_id is not None else self._document_of(event.message)
+        traced = None if user_id is not None else await self._trace(event.message)
+        if traced is not None and traced.document_id is None and traced.cached:
+            await event.reply(t.text("ban.untraced"))
+            return
+        document_id = None if traced is None else traced.document_id
         if user_id is None and document_id is None:
             # Asked again, so a typo doesn't need the panel opened again.
             self._asking[event.sender_id] = kind
@@ -293,6 +308,8 @@ class Admin:
             users = tuple(u for u in self._store.senders(document_id) if not self.is_admin(u))
             if users:
                 question = t.phrase("ban.confirm_file", count=len(users), users=_ids(users))
+            elif traced is not None and traced.cached:
+                question = t.phrase("ban.confirm_unrecorded")
             else:
                 question = t.phrase("ban.confirm_unsent")
         pending = PendingBan(event.message.id, users, document_id)
@@ -334,11 +351,12 @@ class Admin:
             deleted += len(batch)
         return deleted
 
-    def _document_of(self, message: Any) -> int | None:
-        """The file a message is about. One forwarded from the cache channel
-        stands for the file users sent, which the bot's copy there isn't."""
-        forward = getattr(message, "fwd_from", None)
+    async def _trace(self, message: Any) -> Traced | None:
+        """The file a message is about, or None if it holds none. A copy from
+        the cache channel stands for the file users sent, which it isn't: the
+        bot made the copy from its own upload."""
         channel = self._config.cache_channel_id
+        forward = getattr(message, "fwd_from", None)
         post = getattr(forward, "channel_post", None)
         source = getattr(forward, "from_id", None)
         if (
@@ -348,10 +366,38 @@ class Admin:
             and utils.get_peer_id(source) == channel
         ):
             key = self._store.cache_key_at(channel, post)
-            if key is not None:
-                return int(key.split(":", 1)[0])
+            return Traced(None if key is None else _sent_document(key), cached=True)
         document = getattr(message, "document", None)
-        return None if document is None else int(document.id)
+        if document is None:
+            return None
+        document_id = int(document.id)
+        if self._store.senders(document_id) or self._store.is_file_banned(document_id):
+            return Traced(document_id, cached=False)
+        # Forwarded without its "Forwarded from" line, or saved and sent again:
+        # the copy's own file is all there is to go on.
+        key = None if channel is None else await self._cached_copy(channel, document_id)
+        if key is not None:
+            return Traced(_sent_document(key), cached=True)
+        return Traced(document_id, cached=False)
+
+    async def _cached_copy(self, channel: int, document_id: int) -> str | None:
+        """The cache entry whose copy in the channel is this file, by looking
+        at each one. Only for an admin's ban, so it may take a while."""
+        entries = self._store.cache_entries(channel)
+        for start in range(0, len(entries), FETCH_BATCH):
+            batch = entries[start : start + FETCH_BATCH]
+            try:
+                messages = await self._client.get_messages(
+                    channel, ids=[message for _, message in batch]
+                )
+            except Exception:
+                log.warning("could not read the cache channel", exc_info=True)
+                return None
+            for (key, _), message in zip(batch, messages, strict=False):
+                file = getattr(message, "document", None) if message is not None else None
+                if file is not None and int(file.id) == document_id:
+                    return key
+        return None
 
     async def _confirm_ban(self, event: Any, draft: str, *, purge: bool = False) -> None:
         t = self._t(event)
@@ -489,6 +535,11 @@ class Admin:
             await _quietly(event.edit(t.text("broadcast.failed")))
             return
         await _quietly(event.edit(t.text("broadcast.finished", tally=tally.describe(t))))
+
+
+def _sent_document(key: str) -> int:
+    """A cache key starts with the id of the file the user sent."""
+    return int(key.split(":", 1)[0])
 
 
 def _user_id(text: str) -> int | None:
