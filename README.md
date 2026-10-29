@@ -250,7 +250,11 @@ spot. A file forwarded from the cache channel works: the bot looks up which
 file users sent to make it. Anything else is matched by Telegram's own file,
 so a file forwarded around keeps matching, but the same video uploaded afresh
 is a different file. A ban closes the person's open menus and stops their
-files, and they're left out of broadcasts. Admins can't be banned. Who sent
+files, and they're left out of broadcasts. When anything they sent is in the
+cache channel, the confirmation also offers **🗑 Ban and delete their cached
+files**, which deletes those copies from the channel; a file someone else sent
+too goes for them as well, and is made again the next time it's asked for.
+Admins can't be banned. Who sent
 which file is only recorded from the version that added bans, so files sent
 before it lead to nobody.
 

@@ -17,6 +17,8 @@
   anywhere else. A banned file stays banned, so whoever sends it next is banned
   too. ✅ Unban lifts a ban by id, or lifts a file's ban along with everyone
   banned for sending it. Banned people get no menus and no broadcasts.
+- **Deleting a banned user's cached files.** When someone being banned has
+  files in the cache channel, the confirmation offers to delete them too.
 
 ### Security
 
