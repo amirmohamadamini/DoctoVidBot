@@ -5,14 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
-from telethon import events
+from telethon import events, utils
 
 from .backup import Backups
 from .broadcast import Broadcaster, Refetch, Tally
 from .config import Config
-from .i18n import Html, Locale, plain
+from .i18n import FSI, PDI, Html, Locale, plain
 from .membership import POSTING_FIX, Membership, channel_problem
 from .store import Store
 from .transport import DANGER, PRIMARY, SUCCESS, Key, Keyboard, Style, to_buttons
@@ -21,6 +22,19 @@ log = logging.getLogger(__name__)
 
 #: Telegram cuts a button's pop-up answer off at 200 characters.
 ALERT_LIMIT = 200
+
+#: How many of a file's senders a ban confirmation lists by id.
+LISTED_SENDERS = 30
+
+
+@dataclass(frozen=True, slots=True)
+class PendingBan:
+    """A ban an admin asked for, waiting for them to confirm it."""
+
+    message_id: int
+    users: tuple[int, ...]
+    #: The file the ban is for. Banned too, so whoever sends it next is banned.
+    document_id: int | None
 
 
 class Admin:
@@ -36,6 +50,7 @@ class Admin:
         activity: Callable[[Locale], Html],
         locale_for: Callable[[int], Locale],
         is_keyboard_label: Callable[[str], bool],
+        on_ban: Callable[[int], Awaitable[None]] | None = None,
     ) -> None:
         self._client = client
         self._config = config
@@ -46,12 +61,17 @@ class Admin:
         self._activity = activity
         self._locale_for = locale_for
         self._is_keyboard_label = is_keyboard_label
+        self._on_ban = on_ban
         #: Admins the bot is waiting on for a message to broadcast.
         self._drafting: set[int] = set()
         #: The message each admin drafted, waiting for them to confirm it. A
         #: confirm button names its draft, and only counts while that draft is
         #: the admin's latest: an older button can't send a newer message.
         self._drafts: dict[int, int] = {}
+        #: Admins the bot is waiting on for a user id or a file: "ban" or "unban".
+        self._asking: dict[int, str] = {}
+        #: Like drafts: a confirm button only counts for the admin's latest ban.
+        self._bans: dict[int, PendingBan] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
     def register(self) -> None:
@@ -109,6 +129,7 @@ class Admin:
             t.phrase("admin.users", count=users, active=active),
             t.phrase("admin.cached", count=self._store.cache_size(self._config.cache_channel_id)),
             t.phrase("admin.backups", state=self._backups.describe(t)),
+            t.phrase("admin.banned", count=self._store.ban_counts()[0]),
         )
         if self.is_joining_required() and self._membership is not None and self._membership.broken:
             text = t.lines(text, t.phrase("admin.join_broken"))
@@ -131,6 +152,10 @@ class Admin:
             [
                 Key(t.label("admin.broadcast"), "adm:cast", PRIMARY),
                 Key(t.label("admin.backup_now"), "adm:backup"),
+            ],
+            [
+                Key(t.label("admin.ban"), "adm:bans", DANGER),
+                Key(t.label("admin.unban"), "adm:unbans"),
             ],
             [Key(t.label("admin.refresh"), "adm:panel")],
         ]
@@ -160,6 +185,7 @@ class Admin:
             case "backup":
                 await self._backup(event)
             case "cast":
+                self._asking.pop(event.sender_id, None)
                 self._drafting.add(event.sender_id)
                 await event.answer()
                 await event.respond(
@@ -172,6 +198,21 @@ class Admin:
                 self._drafting.discard(event.sender_id)
                 self._drafts.pop(event.sender_id, None)
                 await event.edit(t.text("broadcast.cancelled"))
+            case "bans" | "unbans":
+                kind = action.removesuffix("s")
+                self._drafting.discard(event.sender_id)
+                self._asking[event.sender_id] = kind
+                await event.answer()
+                await event.respond(
+                    t.text(f"ban.{kind}_prompt"),
+                    buttons=to_buttons([[Key(t.label("menu.cancel"), "adm:noban", DANGER)]]),
+                )
+            case "ban":
+                await self._confirm_ban(event, argument)
+            case "noban":
+                self._asking.pop(event.sender_id, None)
+                self._bans.pop(event.sender_id, None)
+                await event.edit(t.text("ban.cancelled"))
             case _:
                 await event.answer()
 
@@ -224,6 +265,100 @@ class Admin:
             return channel_problem(exc, fix=POSTING_FIX, t=t)
         return None
 
+    # ------------------------------------------------------------ bans
+
+    async def _on_ban_answer(self, event: Any, kind: str) -> None:
+        t = self._t(event)
+        user_id = _user_id(event.raw_text or "")
+        document_id = None if user_id is not None else self._document_of(event.message)
+        if user_id is None and document_id is None:
+            # Asked again, so a typo doesn't need the panel opened again.
+            self._asking[event.sender_id] = kind
+            await event.reply(t.text("ban.unclear"))
+            return
+        if kind == "unban":
+            await self._unban(event, t, user_id, document_id)
+            return
+        if user_id is not None:
+            if self.is_admin(user_id):
+                await event.reply(t.text("ban.admin"))
+                return
+            users: tuple[int, ...] = (user_id,)
+            question = t.phrase("ban.confirm_user", user=_ids(users))
+        else:
+            assert document_id is not None
+            users = tuple(u for u in self._store.senders(document_id) if not self.is_admin(u))
+            if users:
+                question = t.phrase("ban.confirm_file", count=len(users), users=_ids(users))
+            else:
+                question = t.phrase("ban.confirm_unsent")
+        pending = PendingBan(event.message.id, users, document_id)
+        self._bans[event.sender_id] = pending
+        buttons = [
+            [
+                Key(t.label("ban.confirm"), f"adm:ban:{pending.message_id}", DANGER),
+                Key(t.label("menu.cancel"), "adm:noban"),
+            ]
+        ]
+        await event.reply(t.lines(question), buttons=to_buttons(buttons))
+
+    def _document_of(self, message: Any) -> int | None:
+        """The file a message is about. One forwarded from the cache channel
+        stands for the file users sent, which the bot's copy there isn't."""
+        forward = getattr(message, "fwd_from", None)
+        channel = self._config.cache_channel_id
+        post = getattr(forward, "channel_post", None)
+        source = getattr(forward, "from_id", None)
+        if (
+            channel is not None
+            and post
+            and source is not None
+            and utils.get_peer_id(source) == channel
+        ):
+            key = self._store.cache_key_at(channel, post)
+            if key is not None:
+                return int(key.split(":", 1)[0])
+        document = getattr(message, "document", None)
+        return None if document is None else int(document.id)
+
+    async def _confirm_ban(self, event: Any, draft: str) -> None:
+        t = self._t(event)
+        pending = self._bans.get(event.sender_id)
+        if pending is None or draft != str(pending.message_id):
+            await event.answer()
+            await event.edit(t.text("ban.stale"))
+            return
+        del self._bans[event.sender_id]
+        if pending.document_id is not None:
+            self._store.ban_file(pending.document_id)
+        for user_id in pending.users:
+            self._store.ban(user_id, pending.document_id)
+        await event.answer()
+        if pending.document_id is None:
+            await event.edit(t.text("ban.done_user", user=_ids(pending.users)))
+        else:
+            await event.edit(t.text("ban.done_file", count=len(pending.users)))
+        if self._on_ban is not None:
+            for user_id in pending.users:
+                try:
+                    await self._on_ban(user_id)
+                except Exception:
+                    log.warning("could not stop the work of banned user %s", user_id, exc_info=True)
+
+    async def _unban(
+        self, event: Any, t: Locale, user_id: int | None, document_id: int | None
+    ) -> None:
+        if user_id is not None:
+            key = "ban.unbanned_user" if self._store.unban(user_id) else "ban.not_banned_user"
+            await event.reply(t.text(key, user=_ids((user_id,))))
+            return
+        assert document_id is not None
+        was_banned, people = self._store.unban_file(document_id)
+        if was_banned or people:
+            await event.reply(t.text("ban.unbanned_file", count=people))
+        else:
+            await event.reply(t.text("ban.not_banned_file"))
+
     # ------------------------------------------------------------ broadcast
 
     def _is_draft(self, event: Any) -> bool:
@@ -232,12 +367,15 @@ class Admin:
         text = event.raw_text or ""
         return (
             bool(event.is_private)
-            and event.sender_id in self._drafting
+            and (event.sender_id in self._drafting or event.sender_id in self._asking)
             and not self._is_keyboard_label(text)
             and not text.startswith("/")
         )
 
     async def _on_draft(self, event: Any) -> None:
+        if kind := self._asking.pop(event.sender_id, None):
+            await self._on_ban_answer(event, kind)
+            return
         self._drafting.discard(event.sender_id)
         t = self._t(event)
         if self._broadcaster.running:
@@ -316,6 +454,22 @@ class Admin:
             await _quietly(event.edit(t.text("broadcast.failed")))
             return
         await _quietly(event.edit(t.text("broadcast.finished", tally=tally.describe(t))))
+
+
+def _user_id(text: str) -> int | None:
+    text = text.strip()
+    if not text.isascii() or not text.isdigit():
+        return None
+    user_id = int(text)
+    return user_id if 0 < user_id < 2**53 else None
+
+
+def _ids(users: tuple[int, ...]) -> Html:
+    """User ids as Latin digits, which an admin can copy, laid out on their own."""
+    shown = ", ".join(f"<code>{user}</code>" for user in users[:LISTED_SENDERS])
+    if len(users) > LISTED_SENDERS:
+        shown += ", …"
+    return Html(FSI + shown + PDI)
 
 
 def _forwarded(message: Any) -> bool:

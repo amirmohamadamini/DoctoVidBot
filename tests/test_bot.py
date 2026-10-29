@@ -901,3 +901,54 @@ async def test_a_rename_finished_during_the_join_check_voids_the_old_tap(
     # The tap was on the old menu, for the old name.
     assert bot._queue.waiting == 0
     assert list(bot._requests) == [1]
+
+
+# ---------------------------------------------------------------- bans
+
+
+async def test_a_banned_user_is_told_and_nothing_else_happens(
+    bot: Bot, client: FakeClient, store: Store
+) -> None:
+    store.ban(42)
+    event = Event(client, 42, document("film.mkv"))
+    event.is_private = True  # type: ignore[attr-defined]
+    assert bot._is_banned_event(event)
+    with pytest.raises(events.StopPropagation):
+        await bot._on_banned(event)
+    assert "banned" in bare(client.sent[0].text)
+
+    button = Event(client, 42, data="video:1")
+    await bot._on_button(button)
+    assert "banned" in button.answers[0]
+
+
+async def test_admins_are_never_treated_as_banned(bot: Bot, store: Store) -> None:
+    store.ban(7)
+    assert not bot._is_banned(7)
+
+
+async def test_whoever_sent_a_file_is_remembered(
+    bot: Bot, client: FakeClient, store: Store
+) -> None:
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    assert store.senders(9000) == [42]
+
+
+async def test_sending_a_banned_file_bans_the_sender(
+    bot: Bot, client: FakeClient, store: Store
+) -> None:
+    store.ban_file(9000)
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    assert store.is_banned(42)
+    assert "banned" in bare(client.sent[0].text)
+    assert bot._requests == {}
+
+
+async def test_a_ban_closes_menus_and_stops_files(bot: Bot, client: FakeClient) -> None:
+    await bot._on_message(Event(client, 42, document("film.mkv")))
+    await bot._on_message(Event(client, 42, document("other.mkv")))
+    await bot._on_button(tap(bot, client, 42, "video:1"))
+    assert bot._queue.waiting == 1
+    await bot._drop_user(42)
+    assert bot._requests == {}
+    assert bot._queue.waiting == 0

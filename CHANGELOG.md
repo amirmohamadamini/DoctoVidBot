@@ -12,6 +12,11 @@
 - **Videos sent back as files are cached too**, when the cache is on. A video
   turned into a document comes back from the cache channel next time, like a
   video made playable already did. The two are kept apart.
+- **Bans.** 🚫 Ban in the admin panel bans someone by their user id, or bans
+  everyone who sent a file when an admin forwards it, from the cache channel or
+  anywhere else. A banned file stays banned, so whoever sends it next is banned
+  too. ✅ Unban lifts a ban by id, or lifts a file's ban along with everyone
+  banned for sending it. Banned people get no menus and no broadcasts.
 
 ### Security
 
