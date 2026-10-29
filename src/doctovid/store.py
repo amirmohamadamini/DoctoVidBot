@@ -130,6 +130,13 @@ class Store:
         ).fetchone()
         return None if row is None else str(row[0])
 
+    def cache_entries(self, channel: int) -> list[tuple[str, int]]:
+        """(key, message id) of everything cached in `channel`."""
+        rows = self._db.execute(
+            "SELECT key, message_id FROM cache WHERE channel = ? ORDER BY message_id", (channel,)
+        )
+        return [(str(row[0]), int(row[1])) for row in rows]
+
     def cache_size(self, channel: int | None) -> int:
         row = self._db.execute(
             "SELECT COUNT(*) FROM cache WHERE channel = ?", (channel,)

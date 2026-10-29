@@ -567,3 +567,57 @@ async def test_without_cached_files_there_is_only_the_plain_ban(admin: Admin) ->
     await tap(admin, "adm:bans")
     question = await answer(admin, Chat(7, text="42", message_id=60))
     assert len(question.buttons) == 1
+
+
+class CacheChannel(FakeClient):
+    """Messages in the cache channel, by id, each holding a file."""
+
+    def __init__(self, files: dict[int, int]) -> None:
+        super().__init__()
+        self.files_at = files
+
+    async def get_messages(self, chat_id: int, ids: Any) -> Any:
+        return [
+            SimpleNamespace(id=i, document=SimpleNamespace(id=self.files_at[i]))
+            if i in self.files_at
+            else None
+            for i in ids
+        ]
+
+
+async def test_a_cached_copy_sent_without_its_forward_line_is_traced(
+    config: Config, store: Store, tmp_path: Path
+) -> None:
+    client = CacheChannel({321: 5555, 322: 6666})
+    admin = build_admin(client, config, store, tmp_path)
+    store.remember(CHANNEL, "9000:video", 321)
+    store.remember(CHANNEL, "9001:video", 322)
+    store.sent(9001, 42)
+    await tap(admin, "adm:bans")
+    question = await answer(admin, sent_file(60, 6666))
+    assert "1 person sent this file: 42" in bare(plain(question.said[0]))
+
+
+async def test_a_cached_file_from_before_senders_were_recorded_says_so(
+    config: Config, store: Store, tmp_path: Path
+) -> None:
+    client = CacheChannel({321: 5555})
+    admin = build_admin(client, config, store, tmp_path)
+    store.remember(CHANNEL, "9000:video", 321)
+    await tap(admin, "adm:bans")
+    question = await answer(admin, sent_file(60, 5555))
+    assert "sent before the bot started recording" in bare(plain(question.said[0]))
+    await tap(admin, confirm_data(question))
+    assert store.is_file_banned(9000)
+
+
+async def test_a_cache_message_missing_from_the_index_is_explained(
+    client: FakeClient, config: Config, store: Store, tmp_path: Path
+) -> None:
+    config = dataclasses.replace(config, cache_channel_id=-1001234567890)
+    admin = build_admin(client, config, store, tmp_path)
+    forward = MessageFwdHeader(date=None, from_id=PeerChannel(1234567890), channel_post=999)
+    await tap(admin, "adm:bans")
+    event = await answer(admin, sent_file(60, 5555, forward))
+    assert "no entry for it" in bare(plain(event.said[0]))
+    assert admin._bans == {}
