@@ -26,6 +26,9 @@ ALERT_LIMIT = 200
 #: How many of a file's senders a ban confirmation lists by id.
 LISTED_SENDERS = 30
 
+#: Telegram deletes at most this many messages in one request.
+DELETE_BATCH = 100
+
 
 @dataclass(frozen=True, slots=True)
 class PendingBan:
@@ -207,8 +210,8 @@ class Admin:
                     t.text(f"ban.{kind}_prompt"),
                     buttons=to_buttons([[Key(t.label("menu.cancel"), "adm:noban", DANGER)]]),
                 )
-            case "ban":
-                await self._confirm_ban(event, argument)
+            case "ban" | "banx":
+                await self._confirm_ban(event, argument, purge=action == "banx")
             case "noban":
                 self._asking.pop(event.sender_id, None)
                 self._bans.pop(event.sender_id, None)
@@ -294,13 +297,42 @@ class Admin:
                 question = t.phrase("ban.confirm_unsent")
         pending = PendingBan(event.message.id, users, document_id)
         self._bans[event.sender_id] = pending
-        buttons = [
-            [
-                Key(t.label("ban.confirm"), f"adm:ban:{pending.message_id}", DANGER),
-                Key(t.label("menu.cancel"), "adm:noban"),
-            ]
-        ]
+        ban = Key(t.label("ban.confirm"), f"adm:ban:{pending.message_id}", DANGER)
+        cancel = Key(t.label("menu.cancel"), "adm:noban")
+        cached = len(self._cached_from(users))
+        if cached:
+            question = t.lines(question, Html(""), t.phrase("ban.cached", count=cached))
+            purge = Key(t.label("ban.confirm_purge"), f"adm:banx:{pending.message_id}", DANGER)
+            buttons = [[ban], [purge], [cancel]]
+        else:
+            buttons = [[ban, cancel]]
         await event.reply(t.lines(question), buttons=to_buttons(buttons))
+
+    def _cached_from(self, users: tuple[int, ...]) -> list[tuple[str, int]]:
+        channel = self._config.cache_channel_id
+        return [] if channel is None else self._store.cached_from(channel, users)
+
+    async def _purge(self, users: tuple[int, ...]) -> int:
+        """Deletes what these people's files made in the cache channel, and
+        forgets it. Returns how many were deleted."""
+        channel = self._config.cache_channel_id
+        entries = self._cached_from(users)
+        if channel is None or not entries:
+            return 0
+        deleted = 0
+        for start in range(0, len(entries), DELETE_BATCH):
+            batch = entries[start : start + DELETE_BATCH]
+            try:
+                await self._client.delete_messages(channel, [message for _, message in batch])
+            except Exception:
+                # Kept in the index: the files are still there, and the next
+                # ban can try again.
+                log.warning("could not delete cached files of banned users", exc_info=True)
+                continue
+            for key, _ in batch:
+                self._store.forget(channel, key)
+            deleted += len(batch)
+        return deleted
 
     def _document_of(self, message: Any) -> int | None:
         """The file a message is about. One forwarded from the cache channel
@@ -321,7 +353,7 @@ class Admin:
         document = getattr(message, "document", None)
         return None if document is None else int(document.id)
 
-    async def _confirm_ban(self, event: Any, draft: str) -> None:
+    async def _confirm_ban(self, event: Any, draft: str, *, purge: bool = False) -> None:
         t = self._t(event)
         pending = self._bans.get(event.sender_id)
         if pending is None or draft != str(pending.message_id):
@@ -335,9 +367,12 @@ class Admin:
             self._store.ban(user_id, pending.document_id)
         await event.answer()
         if pending.document_id is None:
-            await event.edit(t.text("ban.done_user", user=_ids(pending.users)))
+            done = t.phrase("ban.done_user", user=_ids(pending.users))
         else:
-            await event.edit(t.text("ban.done_file", count=len(pending.users)))
+            done = t.phrase("ban.done_file", count=len(pending.users))
+        if purge:
+            done = t.lines(done, t.phrase("ban.purged", count=await self._purge(pending.users)))
+        await event.edit(t.lines(done))
         if self._on_ban is not None:
             for user_id in pending.users:
                 try:

@@ -18,7 +18,7 @@ from doctovid.i18n import Html, plain
 from doctovid.menus import keyboard_actions
 from doctovid.store import Store
 
-from .conftest import EN, FA, LOCALES, bare
+from .conftest import CHANNEL, EN, FA, LOCALES, bare
 
 
 class Chat:
@@ -63,6 +63,7 @@ class FakeClient:
         self.copied: list[int] = []
         self.forwarded: list[int] = []
         self.files: list[int] = []
+        self.deleted: list[tuple[int, list[int]]] = []
         #: Messages in the admin's chat that were forwarded from somewhere.
         self.forwards: set[int] = set()
         #: Set, fetching a message waits for it.
@@ -89,7 +90,7 @@ class FakeClient:
         return SimpleNamespace(id=1)
 
     async def delete_messages(self, chat_id: int, ids: list[int]) -> None:
-        pass
+        self.deleted.append((chat_id, ids))
 
     async def send_file(self, chat_id: int, path: str, **kwargs: Any) -> None:
         self.files.append(chat_id)
@@ -538,3 +539,31 @@ async def test_unbanning_a_user_or_a_file(admin: Admin, store: Store) -> None:
     assert "File unbanned, and 1 person" in bare(plain(event.said[0]))
     assert not store.is_banned(43)
     assert not store.is_file_banned(9000)
+
+
+async def test_a_ban_can_also_delete_their_files_from_the_cache(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.remember(CHANNEL, "9000:video", 321)
+    store.remember(CHANNEL, "9000:file", 322)
+    store.remember(CHANNEL, "9001:video", 323)  # someone else's
+    store.sent(9000, 42)
+    store.sent(9001, 43)
+    await tap(admin, "adm:bans")
+    question = await answer(admin, Chat(7, text="42", message_id=60))
+    assert "2 files they sent are in the cache channel" in bare(plain(question.said[0]))
+    purge = question.buttons[1][0].type.data.decode()
+    assert purge == "adm:banx:60"
+
+    done = await tap(admin, purge)
+    assert store.is_banned(42)
+    assert client.deleted == [(CHANNEL, [321, 322])]
+    assert store.cached(CHANNEL, "9000:video") is None
+    assert store.cached(CHANNEL, "9001:video") == 323
+    assert "Deleted 2 files from the cache channel." in bare(plain(done.edited[0]))
+
+
+async def test_without_cached_files_there_is_only_the_plain_ban(admin: Admin) -> None:
+    await tap(admin, "adm:bans")
+    question = await answer(admin, Chat(7, text="42", message_id=60))
+    assert len(question.buttons) == 1

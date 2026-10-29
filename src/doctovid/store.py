@@ -225,6 +225,20 @@ class Store:
         )
         return [int(row[0]) for row in rows]
 
+    def cached_from(self, channel: int, users: tuple[int, ...]) -> list[tuple[str, int]]:
+        """(key, message id) of every file in `channel` made from one of these
+        people sent. A file several people sent is in it once, for all of them."""
+        if not users:
+            return []
+        marks = ", ".join("?" * len(users))
+        rows = self._db.execute(
+            "SELECT DISTINCT c.key, c.message_id FROM cache c JOIN senders s "
+            "ON substr(c.key, 1, instr(c.key, ':') - 1) = CAST(s.document_id AS TEXT) "
+            f"WHERE c.channel = ? AND s.user_id IN ({marks}) ORDER BY c.message_id",
+            (channel, *users),
+        )
+        return [(str(row[0]), int(row[1])) for row in rows]
+
     def is_banned(self, user_id: int) -> bool:
         row = self._db.execute("SELECT 1 FROM bans WHERE user_id = ?", (user_id,)).fetchone()
         return row is not None

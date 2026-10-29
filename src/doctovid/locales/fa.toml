@@ -198,6 +198,9 @@ unbanned_user = "مسدودیت {user} برداشته شد."
 not_banned_user = "{user} مسدود نبود."
 unbanned_file = { other = "مسدودیت فایل و {count} نفری که به خاطر آن مسدود شده بودند برداشته شد." }
 not_banned_file = "این فایل مسدود نبود."
+cached = { other = "{count} فایل از فرستاده‌های آن‌ها در کانال کش هست." }
+confirm_purge = "🗑 مسدود کردن و پاک کردن فایل‌هایشان از کش"
+purged = { other = "{count} فایل از کانال کش پاک شد." }
 you_are_banned = "دسترسی شما به این ربات مسدود شده است."
 
 [broadcast]

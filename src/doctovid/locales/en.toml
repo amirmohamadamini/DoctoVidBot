@@ -200,6 +200,9 @@ unbanned_user = "Unbanned {user}."
 not_banned_user = "{user} wasn't banned."
 unbanned_file = { one = "File unbanned, and {count} person who was banned for it.", other = "File unbanned, and {count} people who were banned for it." }
 not_banned_file = "That file wasn't banned."
+cached = { one = "{count} file they sent is in the cache channel.", other = "{count} files they sent are in the cache channel." }
+confirm_purge = "🗑 Ban and delete their cached files"
+purged = { one = "Deleted {count} file from the cache channel.", other = "Deleted {count} files from the cache channel." }
 you_are_banned = "You've been banned from using this bot."
 
 [broadcast]
