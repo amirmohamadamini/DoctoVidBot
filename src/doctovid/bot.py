@@ -136,6 +136,7 @@ class Bot:
             activity=self.activity,
             locale_for=self.locale_for,
             is_keyboard_label=self._keyboard_actions.__contains__,
+            on_ban=self._drop_user,
         )
 
     # ------------------------------------------------------------ lifecycle
@@ -147,6 +148,9 @@ class Bot:
         # catch-all message handler at the end only sees what they didn't claim.
         self._client.add_event_handler(
             self._on_anything, events.NewMessage(incoming=True, func=_private)
+        )
+        self._client.add_event_handler(
+            self._on_banned, events.NewMessage(incoming=True, func=self._is_banned_event)
         )
         self._client.add_event_handler(
             self._on_start, events.NewMessage(pattern=r"^/start\b", func=_private)
@@ -239,6 +243,27 @@ class Bot:
 
     async def _on_anything(self, event: Any) -> None:
         self._store.seen(event.sender_id)
+
+    def _is_banned(self, user_id: int) -> bool:
+        return not self._admin.is_admin(user_id) and self._store.is_banned(user_id)
+
+    def _is_banned_event(self, event: Any) -> bool:
+        return _private(event) and self._is_banned(event.sender_id)
+
+    async def _on_banned(self, event: Any) -> None:
+        await event.respond(self.locale_for(event.sender_id).text("ban.you_are_banned"))
+        raise events.StopPropagation
+
+    async def _drop_user(self, user_id: int) -> None:
+        """Someone was just banned: their menus close and their files stop."""
+        t = self.locale_for(user_id)
+        for request in [r for r in self._requests.values() if r.user_id == user_id]:
+            self._close(request)
+            await self._edit(user_id, request.menu_message_id, t.text("ban.you_are_banned"))
+        for job in self._queue.jobs_for(user_id):
+            self._queue.cancel(job.id)
+            _discard(job.request.thumbnail)
+            await self._edit(user_id, job.status_message_id, t.text("ban.you_are_banned"))
 
     async def _on_start(self, event: Any) -> None:
         # The first time, the language comes first: everything after it is
@@ -341,6 +366,9 @@ class Bot:
         if prompt is not None and prompt.kind == "name" and message.raw_text and not message.file:
             await self._take_name(event, prompt)
             return
+        if message.document and self._sent_banned_file(event.sender_id, message.document.id):
+            await event.reply(self.locale_for(event.sender_id).text("ban.you_are_banned"))
+            return
         if not await self._may_use(event):
             return
         if message.photo:
@@ -373,9 +401,20 @@ class Bot:
         await event.reply(text, buttons=to_buttons(keyboard))
         return False
 
+    def _sent_banned_file(self, user_id: int, document_id: int) -> bool:
+        """Sending a banned file bans the sender. Admins are only refused."""
+        if not self._store.is_file_banned(document_id):
+            return False
+        if not self._admin.is_admin(user_id):
+            self._store.ban(user_id, document_id)
+            log.info("user %s banned for sending banned file %s", user_id, document_id)
+        return True
+
     async def _take_file(self, event: Any) -> None:
         message = event.message
         user_id = event.sender_id
+        # Before any refusal: whoever sent a file can be banned for it later.
+        self._store.sent(message.document.id, user_id)
         t = self.locale_for(user_id)
         size = message.file.size or 0
         if size > self._config.max_file_bytes:
@@ -525,6 +564,13 @@ class Bot:
     # ------------------------------------------------------------ buttons
 
     async def _on_button(self, event: Any) -> None:
+        if self._is_banned(event.sender_id):
+            t = self.locale_for(event.sender_id)
+            await event.answer(t.alert("ban.you_are_banned"), alert=True)
+            return
+        await self._on_user_button(event)
+
+    async def _on_user_button(self, event: Any) -> None:
         action, _, raw_id = event.data.decode(errors="replace").partition(":")
         if action == "lang":
             await self._set_language(event, raw_id)

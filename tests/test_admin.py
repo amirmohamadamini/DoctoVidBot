@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from telethon import events
+from telethon.tl.types import MessageFwdHeader, PeerChannel
 
 from doctovid.admin import Admin
 from doctovid.backup import Backups
 from doctovid.broadcast import Broadcaster
 from doctovid.config import Config
-from doctovid.i18n import Html
+from doctovid.i18n import Html, plain
 from doctovid.menus import keyboard_actions
 from doctovid.store import Store
 
@@ -148,6 +150,8 @@ def test_the_panel_shows_the_state_of_things(admin: Admin, store: Store) -> None
         "🔒 Join required: off",
         "📣 Broadcast",
         "💾 Backup now",
+        "🚫 Ban",
+        "✅ Unban",
         "🔄 Refresh",
     ]
 
@@ -412,3 +416,125 @@ def test_the_panel_warns_when_the_join_check_lets_everyone_in(
     store.set_switch("join", True)
     text, _ = admin.panel(EN)
     assert "everyone is let in" in text
+
+
+# ---------------------------------------------------------------- bans
+
+
+async def answer(admin: Admin, event: Chat) -> Chat:
+    with pytest.raises(events.StopPropagation):
+        await admin._admins_only(admin._on_draft)(event)
+    return event
+
+
+def sent_file(message_id: int, document_id: int, forward: Any = None) -> Chat:
+    event = Chat(7, message_id=message_id)
+    event.message = SimpleNamespace(
+        id=message_id, fwd_from=forward, document=SimpleNamespace(id=document_id)
+    )
+    return event
+
+
+def confirm_data(event: Chat) -> str:
+    data: bytes = event.buttons[0][0].type.data
+    return data.decode()
+
+
+async def test_a_user_is_banned_by_id_after_confirming(admin: Admin, store: Store) -> None:
+    banned: list[int] = []
+
+    async def on_ban(user_id: int) -> None:
+        banned.append(user_id)
+
+    admin._on_ban = on_ban
+    prompt = await tap(admin, "adm:bans")
+    assert "Send me the id" in bare(plain(prompt.said[0]))
+    question = await answer(admin, Chat(7, text=" 42 ", message_id=60))
+    assert "Ban 42?" in bare(plain(question.said[0]))
+    assert not store.is_banned(42)
+
+    done = await tap(admin, confirm_data(question))
+    assert store.is_banned(42)
+    assert banned == [42]
+    assert bare(plain(done.edited[0])) == "Banned 42."
+    assert "Banned: 1 person" in bare(admin.panel(EN)[0])
+    assert store.reachable_users() == []
+
+
+async def test_admins_cannot_be_banned(admin: Admin, store: Store) -> None:
+    await tap(admin, "adm:bans")
+    event = await answer(admin, Chat(7, text="7", message_id=60))
+    assert "Admins can't be banned" in bare(plain(event.said[0]))
+    assert not store.is_banned(7)
+
+
+async def test_something_unclear_is_asked_for_again(admin: Admin) -> None:
+    await tap(admin, "adm:bans")
+    event = await answer(admin, Chat(7, text="spammer", message_id=60))
+    assert "isn't a user id or a file" in bare(plain(event.said[0]))
+    assert admin._asking == {7: "ban"}
+
+
+async def test_everyone_who_sent_a_file_is_banned_with_it(admin: Admin, store: Store) -> None:
+    store.sent(9000, 42)
+    store.sent(9000, 43)
+    store.sent(9000, 7)  # an admin, left alone
+    store.sent(9001, 44)
+    await tap(admin, "adm:bans")
+    question = await answer(admin, sent_file(60, 9000))
+    assert "2 people sent this file: 42, 43" in bare(plain(question.said[0]))
+
+    await tap(admin, confirm_data(question))
+    assert [store.is_banned(user) for user in (42, 43, 7, 44)] == [True, True, False, False]
+    assert store.is_file_banned(9000)
+
+
+async def test_a_file_forwarded_from_the_cache_channel_leads_to_its_senders(
+    client: FakeClient, config: Config, store: Store, tmp_path: Path
+) -> None:
+    config = dataclasses.replace(config, cache_channel_id=-1001234567890)
+    admin = build_admin(client, config, store, tmp_path)
+    store.remember(-1001234567890, "9000:video", 321)
+    store.sent(9000, 42)
+    forward = MessageFwdHeader(date=None, from_id=PeerChannel(1234567890), channel_post=321)
+    await tap(admin, "adm:bans")
+    # The copy in the channel is a file of its own, with another id.
+    question = await answer(admin, sent_file(60, 5555, forward))
+    assert "1 person sent this file: 42" in bare(plain(question.said[0]))
+    await tap(admin, confirm_data(question))
+    assert store.is_banned(42)
+    assert store.is_file_banned(9000)
+
+
+async def test_only_the_latest_ban_can_be_confirmed(admin: Admin, store: Store) -> None:
+    await tap(admin, "adm:bans")
+    first = await answer(admin, Chat(7, text="42", message_id=60))
+    await tap(admin, "adm:bans")
+    await answer(admin, Chat(7, text="43", message_id=61))
+    stale = await tap(admin, confirm_data(first))
+    assert "already done, cancelled or replaced" in bare(plain(stale.edited[0]))
+    assert not store.is_banned(42)
+
+
+async def test_a_ban_can_be_cancelled(admin: Admin, store: Store) -> None:
+    await tap(admin, "adm:bans")
+    question = await answer(admin, Chat(7, text="42", message_id=60))
+    await tap(admin, "adm:noban")
+    await tap(admin, confirm_data(question))
+    assert not store.is_banned(42)
+
+
+async def test_unbanning_a_user_or_a_file(admin: Admin, store: Store) -> None:
+    store.ban(42)
+    store.ban_file(9000)
+    store.ban(43, 9000)
+    await tap(admin, "adm:unbans")
+    event = await answer(admin, Chat(7, text="42", message_id=60))
+    assert bare(plain(event.said[0])) == "Unbanned 42."
+    assert not store.is_banned(42)
+
+    await tap(admin, "adm:unbans")
+    event = await answer(admin, sent_file(61, 9000))
+    assert "File unbanned, and 1 person" in bare(plain(event.said[0]))
+    assert not store.is_banned(43)
+    assert not store.is_file_banned(9000)

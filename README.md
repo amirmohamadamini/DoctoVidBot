@@ -234,10 +234,28 @@ backup schedule, with these buttons:
 | 🔒 Join required: on/off | Make users join the channel first, or stop |
 | 📣 Broadcast | Send a message to everyone |
 | 💾 Backup now | Send a backup to the admins |
+| 🚫 Ban | Ban someone by id, or everyone who sent a file |
+| ✅ Unban | Lift a ban by id, or a file's ban |
 | 🔄 Refresh | Update the numbers |
 
 The admin buttons only work for the ids in `ADMIN_IDS`, even if someone else
 gets hold of a panel message.
+
+### Bans
+
+Tap **🚫 Ban**, then either send a user id or forward a file. For a file, the
+bot lists everyone who has sent it and waits for you to confirm; then it bans
+them and the file itself, so whoever sends that file later is banned on the
+spot. A file forwarded from the cache channel works: the bot looks up which
+file users sent to make it. Anything else is matched by Telegram's own file,
+so a file forwarded around keeps matching, but the same video uploaded afresh
+is a different file. A ban closes the person's open menus and stops their
+files, and they're left out of broadcasts. Admins can't be banned. Who sent
+which file is only recorded from the version that added bans, so files sent
+before it lead to nobody.
+
+**✅ Unban** takes an id, or a forwarded file: unbanning a file also unbans
+everyone who was banned for sending it, but not people banned by id.
 
 ## Limits
 

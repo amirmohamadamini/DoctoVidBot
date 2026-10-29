@@ -178,6 +178,29 @@ join_broken = "⚠️ The join check isn't working, so everyone is let in. Make 
 backup_sending = "Sending a backup…"
 backup_sent = { one = "Backup sent to {sent} of {count} admin.", other = "Backup sent to {sent} of {count} admins." }
 post_check = "Checking I can post here."
+banned = { one = "Banned: {count} person", other = "Banned: {count} people" }
+ban = "🚫 Ban"
+unban = "✅ Unban"
+
+[ban]
+ban_prompt = """Send me the id of the person to ban, or forward me a file to ban everyone who sent it. A file forwarded from the cache channel works too.
+Nobody is banned until you confirm."""
+unban_prompt = """Send me the id of the person to unban, or forward me a banned file to lift its ban and unban everyone banned for sending it."""
+unclear = "That isn't a user id or a file. Send a number, or forward a file."
+admin = "That's an admin. Admins can't be banned."
+confirm_user = "Ban {user}? They won't be able to use the bot."
+confirm_file = { one = "{count} person sent this file: {users}. Ban them, and anyone who sends it from now on?", other = "{count} people sent this file: {users}. Ban them, and anyone who sends it from now on?" }
+confirm_unsent = "Nobody has sent this file yet. Ban it, so anyone who sends it is banned?"
+confirm = "🚫 Ban"
+cancelled = "Nobody was banned."
+stale = "That ban was already done, cancelled or replaced. Tap 🚫 Ban to start again."
+done_user = "Banned {user}."
+done_file = { one = "File banned, and {count} person with it. Whoever sends it next is banned too.", other = "File banned, and {count} people with it. Whoever sends it next is banned too." }
+unbanned_user = "Unbanned {user}."
+not_banned_user = "{user} wasn't banned."
+unbanned_file = { one = "File unbanned, and {count} person who was banned for it.", other = "File unbanned, and {count} people who were banned for it." }
+not_banned_file = "That file wasn't banned."
+you_are_banned = "You've been banned from using this bot."
 
 [broadcast]
 prompt = """Send me the message to broadcast: text, a photo, a video, a file, anything.

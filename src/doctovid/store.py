@@ -35,6 +35,21 @@ CREATE TABLE IF NOT EXISTS usage (
     bytes   INTEGER NOT NULL,
     PRIMARY KEY (user_id, day)
 );
+CREATE TABLE IF NOT EXISTS senders (
+    document_id INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    sent_at     INTEGER NOT NULL,
+    PRIMARY KEY (document_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS bans (
+    user_id     INTEGER PRIMARY KEY,
+    banned_at   INTEGER NOT NULL,
+    document_id INTEGER
+);
+CREATE TABLE IF NOT EXISTS banned_files (
+    document_id INTEGER PRIMARY KEY,
+    banned_at   INTEGER NOT NULL
+);
 """
 
 
@@ -108,6 +123,13 @@ class Store:
     def forget(self, channel: int, key: str) -> None:
         self._db.execute("DELETE FROM cache WHERE channel = ? AND key = ?", (channel, key))
 
+    def cache_key_at(self, channel: int, message_id: int) -> str | None:
+        """The entry a message in the cache channel was stored under."""
+        row = self._db.execute(
+            "SELECT key FROM cache WHERE channel = ? AND message_id = ?", (channel, message_id)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
     def cache_size(self, channel: int | None) -> int:
         row = self._db.execute(
             "SELECT COUNT(*) FROM cache WHERE channel = ?", (channel,)
@@ -167,7 +189,10 @@ class Store:
         )
 
     def reachable_users(self) -> list[int]:
-        rows = self._db.execute("SELECT user_id FROM users WHERE blocked = 0 ORDER BY user_id")
+        rows = self._db.execute(
+            "SELECT user_id FROM users WHERE blocked = 0 "
+            "AND user_id NOT IN (SELECT user_id FROM bans) ORDER BY user_id"
+        )
         return [int(row[0]) for row in rows]
 
     def mark_blocked(self, user_id: int) -> None:
@@ -178,6 +203,74 @@ class Store:
         month_ago = int(time.time()) - 30 * 24 * 3600
         row = self._db.execute(
             "SELECT COUNT(*), COUNT(*) FILTER (WHERE last_seen >= ?) FROM users", (month_ago,)
+        ).fetchone()
+        return int(row[0]), int(row[1])
+
+    # ------------------------------------------------------------ bans
+
+    # A Telegram file keeps its document id however many times it is
+    # forwarded, and the cache index is keyed by the id of the file the user
+    # sent. So a file in the cache channel leads back to everyone who sent it.
+
+    def sent(self, document_id: int, user_id: int) -> None:
+        self._db.execute(
+            "INSERT INTO senders (document_id, user_id, sent_at) VALUES (?, ?, ?) "
+            "ON CONFLICT (document_id, user_id) DO UPDATE SET sent_at = excluded.sent_at",
+            (document_id, user_id, int(time.time())),
+        )
+
+    def senders(self, document_id: int) -> list[int]:
+        rows = self._db.execute(
+            "SELECT user_id FROM senders WHERE document_id = ? ORDER BY user_id", (document_id,)
+        )
+        return [int(row[0]) for row in rows]
+
+    def is_banned(self, user_id: int) -> bool:
+        row = self._db.execute("SELECT 1 FROM bans WHERE user_id = ?", (user_id,)).fetchone()
+        return row is not None
+
+    def ban(self, user_id: int, document_id: int | None = None) -> None:
+        """`document_id` is the file they were banned for, if any. A ban
+        already in place keeps its reason."""
+        self._db.execute(
+            "INSERT INTO bans (user_id, banned_at, document_id) VALUES (?, ?, ?) "
+            "ON CONFLICT (user_id) DO NOTHING",
+            (user_id, int(time.time()), document_id),
+        )
+
+    def unban(self, user_id: int) -> bool:
+        """False if they weren't banned."""
+        return self._db.execute("DELETE FROM bans WHERE user_id = ?", (user_id,)).rowcount > 0
+
+    def is_file_banned(self, document_id: int) -> bool:
+        row = self._db.execute(
+            "SELECT 1 FROM banned_files WHERE document_id = ?", (document_id,)
+        ).fetchone()
+        return row is not None
+
+    def ban_file(self, document_id: int) -> None:
+        self._db.execute(
+            "INSERT INTO banned_files (document_id, banned_at) VALUES (?, ?) "
+            "ON CONFLICT (document_id) DO NOTHING",
+            (document_id, int(time.time())),
+        )
+
+    def unban_file(self, document_id: int) -> tuple[bool, int]:
+        """Lifts the file's ban and every ban that was for sending it.
+        (whether the file was banned, how many people were unbanned)."""
+        was_banned = (
+            self._db.execute(
+                "DELETE FROM banned_files WHERE document_id = ?", (document_id,)
+            ).rowcount
+            > 0
+        )
+        people = self._db.execute("DELETE FROM bans WHERE document_id = ?", (document_id,)).rowcount
+        return was_banned, people
+
+    def ban_counts(self) -> tuple[int, int]:
+        """(people banned, files banned)."""
+        row = self._db.execute(
+            "SELECT (SELECT COUNT(*) FROM bans), (SELECT COUNT(*) FROM banned_files)"
         ).fetchone()
         return int(row[0]), int(row[1])
 
