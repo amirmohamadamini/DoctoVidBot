@@ -541,7 +541,7 @@ async def test_unbanning_a_user_or_a_file(admin: Admin, store: Store) -> None:
     assert not store.is_file_banned(9000)
 
 
-async def test_a_ban_can_also_delete_their_files_from_the_cache(
+async def test_a_ban_deletes_their_files_from_the_cache(
     admin: Admin, store: Store, client: FakeClient
 ) -> None:
     store.remember(CHANNEL, "9000:video", 321)
@@ -551,11 +551,12 @@ async def test_a_ban_can_also_delete_their_files_from_the_cache(
     store.sent(9001, 43)
     await tap(admin, "adm:bans")
     question = await answer(admin, Chat(7, text="42", message_id=60))
-    assert "2 files they sent are in the cache channel" in bare(plain(question.said[0]))
-    purge = question.buttons[1][0].type.data.decode()
-    assert purge == "adm:banx:60"
+    assert "2 related files in the cache channel will be deleted too" in bare(
+        plain(question.said[0])
+    )
+    assert len(question.buttons) == 1
 
-    done = await tap(admin, purge)
+    done = await tap(admin, confirm_data(question))
     assert store.is_banned(42)
     assert client.deleted == [(CHANNEL, [321, 322])]
     assert store.cached(CHANNEL, "9000:video") is None
@@ -563,10 +564,31 @@ async def test_a_ban_can_also_delete_their_files_from_the_cache(
     assert "Deleted 2 files from the cache channel." in bare(plain(done.edited[0]))
 
 
-async def test_without_cached_files_there_is_only_the_plain_ban(admin: Admin) -> None:
+async def test_a_banned_file_leaves_the_cache_even_with_no_known_sender(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    store.remember(CHANNEL, "9000:video", 321)
+    await tap(admin, "adm:bans")
+    question = await answer(admin, sent_file(60, 9000))
+    assert "1 related file" in bare(plain(question.said[0]))
+    await tap(admin, confirm_data(question))
+    assert store.is_file_banned(9000)
+    assert client.deleted == [(CHANNEL, [321])]
+
+
+async def test_an_old_delete_button_still_bans(admin: Admin, store: Store) -> None:
+    await tap(admin, "adm:bans")
+    await answer(admin, Chat(7, text="42", message_id=60))
+    await tap(admin, "adm:banx:60")
+    assert store.is_banned(42)
+
+
+async def test_without_cached_files_nothing_is_deleted(admin: Admin, client: FakeClient) -> None:
     await tap(admin, "adm:bans")
     question = await answer(admin, Chat(7, text="42", message_id=60))
-    assert len(question.buttons) == 1
+    done = await tap(admin, confirm_data(question))
+    assert client.deleted == []
+    assert "Deleted" not in bare(plain(done.edited[0]))
 
 
 class CacheChannel(FakeClient):

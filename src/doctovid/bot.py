@@ -366,7 +366,7 @@ class Bot:
         if prompt is not None and prompt.kind == "name" and message.raw_text and not message.file:
             await self._take_name(event, prompt)
             return
-        if message.document and self._sent_banned_file(event.sender_id, message.document.id):
+        if message.document and await self._sent_banned_file(event.sender_id, message.document.id):
             await event.reply(self.locale_for(event.sender_id).text("ban.you_are_banned"))
             return
         if not await self._may_use(event):
@@ -401,13 +401,19 @@ class Bot:
         await event.reply(text, buttons=to_buttons(keyboard))
         return False
 
-    def _sent_banned_file(self, user_id: int, document_id: int) -> bool:
-        """Sending a banned file bans the sender. Admins are only refused."""
+    async def _sent_banned_file(self, user_id: int, document_id: int) -> bool:
+        """Sending a banned file bans the sender, like any ban: their work
+        stops and what they sent leaves the cache. Admins are only refused."""
         if not self._store.is_file_banned(document_id):
             return False
         if not self._admin.is_admin(user_id):
             self._store.ban(user_id, document_id)
             log.info("user %s banned for sending banned file %s", user_id, document_id)
+            await self._drop_user(user_id)
+            try:
+                await self._admin.purge((user_id,), document_id)
+            except Exception:
+                log.warning("could not clear the cache of banned user %s", user_id, exc_info=True)
         return True
 
     async def _take_file(self, event: Any) -> None:

@@ -247,15 +247,15 @@ Tap **🚫 Ban**, then either send a user id or forward a file. For a file, the
 bot lists everyone who has sent it and waits for you to confirm; then it bans
 them and the file itself, so whoever sends that file later is banned on the
 spot. A file forwarded from the cache channel works, with or without its
-"Forwarded from" line: the bot looks up which file users sent to make it. Anything else is matched by Telegram's own file,
-so a file forwarded around keeps matching, but the same video uploaded afresh
-is a different file. A ban closes the person's open menus and stops their
-files, and they're left out of broadcasts. When anything they sent is in the
-cache channel, the confirmation also offers **🗑 Ban and delete their cached
-files**, which deletes those copies from the channel; a file someone else sent
-too goes for them as well, and is made again the next time it's asked for.
-Admins can't be banned. Who sent
-which file is only recorded from the version that added bans, so a cached
+"Forwarded from" line: the bot looks up which file users sent to make it.
+Anything else is matched by Telegram's own file, so a file forwarded around
+keeps matching, but the same video uploaded afresh is a different file. A ban
+closes the person's open menus and stops their files, and they're left out of
+broadcasts. Every ban also deletes, from the cache channel, everything the
+banned people sent and every copy of a banned file, whoever sent it; the
+confirmation says how many. A file someone else sent too goes for them as well,
+and is made again the next time it's asked for. Admins can't be banned. Who
+sent which file is only recorded from the version that added bans, so a cached
 file sent only before it leads to nobody; the bot says so, and can still ban
 the file.
 
