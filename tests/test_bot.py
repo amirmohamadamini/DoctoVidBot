@@ -24,7 +24,7 @@ from doctovid.config import Config, load
 from doctovid.jobs import Job, Mode
 from doctovid.store import Store
 
-from .conftest import FA, MakeClip, bare, make_request, needs_ffmpeg
+from .conftest import CHANNEL, FA, MakeClip, bare, make_request, needs_ffmpeg
 
 
 @dataclass
@@ -938,8 +938,11 @@ async def test_sending_a_banned_file_bans_the_sender(
     bot: Bot, client: FakeClient, store: Store
 ) -> None:
     store.ban_file(9000)
+    store.remember(CHANNEL, "9000:video", 321)
     await bot._on_message(Event(client, 42, document("film.mkv")))
     assert store.is_banned(42)
+    assert 321 in client.deleted
+    assert store.cached(CHANNEL, "9000:video") is None
     assert "banned" in bare(client.sent[0].text)
     assert bot._requests == {}
 

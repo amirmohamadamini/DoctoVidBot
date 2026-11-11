@@ -32,6 +32,14 @@ FETCH_BATCH = 100
 
 
 @dataclass(frozen=True, slots=True)
+class Purged:
+    """How a ban's clearing of the cache channel went, in files."""
+
+    deleted: int
+    failed: int
+
+
+@dataclass(frozen=True, slots=True)
 class Traced:
     """What a file an admin sent leads back to."""
 
@@ -221,8 +229,9 @@ class Admin:
                     t.text(f"ban.{kind}_prompt"),
                     buttons=to_buttons([[Key(t.label("menu.cancel"), "adm:noban", DANGER)]]),
                 )
+            # "banx" is the old "ban and delete" button: every ban deletes now.
             case "ban" | "banx":
-                await self._confirm_ban(event, argument, purge=action == "banx")
+                await self._confirm_ban(event, argument)
             case "noban":
                 self._asking.pop(event.sender_id, None)
                 self._bans.pop(event.sender_id, None)
@@ -314,42 +323,50 @@ class Admin:
                 question = t.phrase("ban.confirm_unsent")
         pending = PendingBan(event.message.id, users, document_id)
         self._bans[event.sender_id] = pending
-        ban = Key(t.label("ban.confirm"), f"adm:ban:{pending.message_id}", DANGER)
-        cancel = Key(t.label("menu.cancel"), "adm:noban")
-        cached = len(self._cached_from(users))
-        if cached:
+        if cached := len(self._cached_for(users, document_id)):
             question = t.lines(question, Html(""), t.phrase("ban.cached", count=cached))
-            purge = Key(t.label("ban.confirm_purge"), f"adm:banx:{pending.message_id}", DANGER)
-            buttons = [[ban], [purge], [cancel]]
-        else:
-            buttons = [[ban, cancel]]
+        buttons = [
+            [
+                Key(t.label("ban.confirm"), f"adm:ban:{pending.message_id}", DANGER),
+                Key(t.label("menu.cancel"), "adm:noban"),
+            ]
+        ]
         await event.reply(t.lines(question), buttons=to_buttons(buttons))
 
-    def _cached_from(self, users: tuple[int, ...]) -> list[tuple[str, int]]:
+    def _cached_for(self, users: tuple[int, ...], document_id: int | None) -> list[tuple[str, int]]:
+        """What a ban deletes from the cache channel: everything these people
+        sent, and the banned file whoever sent it."""
         channel = self._config.cache_channel_id
-        return [] if channel is None else self._store.cached_from(channel, users)
+        if channel is None:
+            return []
+        entries = dict(self._store.cached_from(channel, users))
+        if document_id is not None:
+            entries.update(self._store.cached_of(channel, document_id))
+        return sorted(entries.items(), key=lambda entry: entry[1])
 
-    async def _purge(self, users: tuple[int, ...]) -> int:
-        """Deletes what these people's files made in the cache channel, and
-        forgets it. Returns how many were deleted."""
+    async def purge(self, users: tuple[int, ...], document_id: int | None = None) -> Purged:
+        """Deletes what a ban covers from the cache channel, and forgets it."""
         channel = self._config.cache_channel_id
-        entries = self._cached_from(users)
+        entries = self._cached_for(users, document_id)
         if channel is None or not entries:
-            return 0
-        deleted = 0
+            return Purged(0, 0)
+        deleted = failed = 0
         for start in range(0, len(entries), DELETE_BATCH):
             batch = entries[start : start + DELETE_BATCH]
             try:
                 await self._client.delete_messages(channel, [message for _, message in batch])
             except Exception:
                 # Kept in the index: the files are still there, and the next
-                # ban can try again.
+                # ban can try again. Most often the bot may only post there:
+                # without the right to delete, Telegram refuses posts older
+                # than two days.
                 log.warning("could not delete cached files of banned users", exc_info=True)
+                failed += len(batch)
                 continue
             for key, _ in batch:
                 self._store.forget(channel, key)
             deleted += len(batch)
-        return deleted
+        return Purged(deleted, failed)
 
     async def _trace(self, message: Any) -> Traced | None:
         """The file a message is about, or None if it holds none. A copy from
@@ -399,7 +416,7 @@ class Admin:
                     return key
         return None
 
-    async def _confirm_ban(self, event: Any, draft: str, *, purge: bool = False) -> None:
+    async def _confirm_ban(self, event: Any, draft: str) -> None:
         t = self._t(event)
         pending = self._bans.get(event.sender_id)
         if pending is None or draft != str(pending.message_id):
@@ -416,8 +433,11 @@ class Admin:
             done = t.phrase("ban.done_user", user=_ids(pending.users))
         else:
             done = t.phrase("ban.done_file", count=len(pending.users))
-        if purge:
-            done = t.lines(done, t.phrase("ban.purged", count=await self._purge(pending.users)))
+        purged = await self.purge(pending.users, pending.document_id)
+        if purged.deleted:
+            done = t.lines(done, t.phrase("ban.purged", count=purged.deleted))
+        if purged.failed:
+            done = t.lines(done, t.phrase("ban.purge_failed", count=purged.failed))
         await event.edit(t.lines(done))
         if self._on_ban is not None:
             for user_id in pending.users:

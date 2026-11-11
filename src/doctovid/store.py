@@ -246,6 +246,16 @@ class Store:
         )
         return [(str(row[0]), int(row[1])) for row in rows]
 
+    def cached_of(self, channel: int, document_id: int) -> list[tuple[str, int]]:
+        """(key, message id) of every file in `channel` made from this one,
+        whoever sent it."""
+        rows = self._db.execute(
+            "SELECT key, message_id FROM cache WHERE channel = ? AND key LIKE ? "
+            "ORDER BY message_id",
+            (channel, f"{document_id}:%"),
+        )
+        return [(str(row[0]), int(row[1])) for row in rows]
+
     def is_banned(self, user_id: int) -> bool:
         row = self._db.execute("SELECT 1 FROM bans WHERE user_id = ?", (user_id,)).fetchone()
         return row is not None
