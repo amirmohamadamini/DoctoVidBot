@@ -204,6 +204,7 @@ unbanned_file = { one = "File unbanned, and {count} person who was banned for it
 not_banned_file = "That file wasn't banned."
 cached = { one = "{count} related file in the cache channel will be deleted too.", other = "{count} related files in the cache channel will be deleted too." }
 purged = { one = "Deleted {count} file from the cache channel.", other = "Deleted {count} files from the cache channel." }
+purge_failed = { one = "⚠️ Telegram wouldn't let me delete {count} file from the cache channel. Make the bot an admin there with the Delete messages right, then ban again to retry.", other = "⚠️ Telegram wouldn't let me delete {count} files from the cache channel. Make the bot an admin there with the Delete messages right, then ban again to retry." }
 you_are_banned = "You've been banned from using this bot."
 
 [broadcast]

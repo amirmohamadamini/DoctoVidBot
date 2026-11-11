@@ -643,3 +643,24 @@ async def test_a_cache_message_missing_from_the_index_is_explained(
     event = await answer(admin, sent_file(60, 5555, forward))
     assert "no entry for it" in bare(plain(event.said[0]))
     assert admin._bans == {}
+
+
+async def test_a_refused_delete_says_how_to_fix_it(
+    admin: Admin, store: Store, client: FakeClient
+) -> None:
+    async def refuse(chat_id: int, ids: list[int]) -> None:
+        raise RuntimeError("MESSAGE_DELETE_FORBIDDEN")
+
+    client.delete_messages = refuse  # type: ignore[method-assign]
+    store.remember(CHANNEL, "9000:video", 321)
+    store.sent(9000, 42)
+    await tap(admin, "adm:bans")
+    question = await answer(admin, Chat(7, text="42", message_id=60))
+    done = await tap(admin, confirm_data(question))
+    assert store.is_banned(42)
+    text = bare(plain(done.edited[0]))
+    assert "wouldn't let me delete 1 file" in text
+    assert "Delete messages right" in text
+    assert "Deleted" not in text
+    # Still indexed, so banning again can retry.
+    assert store.cached(CHANNEL, "9000:video") == 321

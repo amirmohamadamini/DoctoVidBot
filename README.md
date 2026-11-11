@@ -142,7 +142,9 @@ Anyone who can see the channel can see what's in it, so keep it private and its
 admins few.
 
 1. Create a private channel and add the bot as an admin that can post
-   messages.
+   messages and delete messages. Deleting is for [bans](#bans), which clear
+   the banned people's files from the channel; with posting alone, Telegram
+   only lets the bot delete posts from the last two days.
 2. Put the channel's id, which starts with `-100`, in `CACHE_CHANNEL_ID` and
    restart.
 3. Post any message in the channel. A bot only learns a channel from an update,

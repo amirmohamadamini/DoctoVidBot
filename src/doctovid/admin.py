@@ -32,6 +32,14 @@ FETCH_BATCH = 100
 
 
 @dataclass(frozen=True, slots=True)
+class Purged:
+    """How a ban's clearing of the cache channel went, in files."""
+
+    deleted: int
+    failed: int
+
+
+@dataclass(frozen=True, slots=True)
 class Traced:
     """What a file an admin sent leads back to."""
 
@@ -336,27 +344,29 @@ class Admin:
             entries.update(self._store.cached_of(channel, document_id))
         return sorted(entries.items(), key=lambda entry: entry[1])
 
-    async def purge(self, users: tuple[int, ...], document_id: int | None = None) -> int:
-        """Deletes what a ban covers from the cache channel, and forgets it.
-        Returns how many were deleted."""
+    async def purge(self, users: tuple[int, ...], document_id: int | None = None) -> Purged:
+        """Deletes what a ban covers from the cache channel, and forgets it."""
         channel = self._config.cache_channel_id
         entries = self._cached_for(users, document_id)
         if channel is None or not entries:
-            return 0
-        deleted = 0
+            return Purged(0, 0)
+        deleted = failed = 0
         for start in range(0, len(entries), DELETE_BATCH):
             batch = entries[start : start + DELETE_BATCH]
             try:
                 await self._client.delete_messages(channel, [message for _, message in batch])
             except Exception:
                 # Kept in the index: the files are still there, and the next
-                # ban can try again.
+                # ban can try again. Most often the bot may only post there:
+                # without the right to delete, Telegram refuses posts older
+                # than two days.
                 log.warning("could not delete cached files of banned users", exc_info=True)
+                failed += len(batch)
                 continue
             for key, _ in batch:
                 self._store.forget(channel, key)
             deleted += len(batch)
-        return deleted
+        return Purged(deleted, failed)
 
     async def _trace(self, message: Any) -> Traced | None:
         """The file a message is about, or None if it holds none. A copy from
@@ -423,8 +433,11 @@ class Admin:
             done = t.phrase("ban.done_user", user=_ids(pending.users))
         else:
             done = t.phrase("ban.done_file", count=len(pending.users))
-        if purged := await self.purge(pending.users, pending.document_id):
-            done = t.lines(done, t.phrase("ban.purged", count=purged))
+        purged = await self.purge(pending.users, pending.document_id)
+        if purged.deleted:
+            done = t.lines(done, t.phrase("ban.purged", count=purged.deleted))
+        if purged.failed:
+            done = t.lines(done, t.phrase("ban.purge_failed", count=purged.failed))
         await event.edit(t.lines(done))
         if self._on_ban is not None:
             for user_id in pending.users:
